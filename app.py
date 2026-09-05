@@ -16,6 +16,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from src.core import (
     PROJECT_ROOT,
     answer_question,
+    explain_with_runtime_model,
     get_dashboard,
     get_record,
     import_transactions_csv,
@@ -82,9 +83,10 @@ def chat():
     session_id = str(payload.get("session_id") or "payproof-session")
     started = time.perf_counter()
     result = answer_question(question, workspace, selected_id, payload.get("filters"))
+    result, model_status = explain_with_runtime_model(question, result)
     latency = round((time.perf_counter() - started) * 1000)
     trace = send_prism_trace(question, result, session_id, latency, workspace)
-    return jsonify({"answer": result.answer, "evidence_ids": result.evidence_ids, "focus_ids": result.focus_ids,
+    return jsonify({"answer": result.answer, "evidence_ids": result.evidence_ids, "focus_ids": result.focus_ids, "model": model_status,
                     "calculation": result.calculation, "context": {"workspace": workspace, "selected_id": selected_id,
                     "evidence_ids": result.evidence_ids, "calculation": result.calculation}, "trace": trace})
 

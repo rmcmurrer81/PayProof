@@ -2,7 +2,9 @@
 
 **Detect what changed before money moves.**
 
-PayProof Atlas is a visual financial-change assistant built for the AI × FINANCE — MONEY TALKS hackathon and the Maximor Money Operations “Explain the Change” track. It turns approved financial records into an interactive relationship map, explains period changes, identifies evidence-backed anomalies, and keeps consequential decisions under human control.
+PayProof Atlas is a visual financial trust-and-risk assistant built for the AI × FINANCE — MONEY TALKS hackathon. It turns approved financial records into an interactive 3D relationship map, explains period changes, identifies evidence-backed anomalies and adversarial instructions, and keeps consequential decisions under human control.
+
+PayProof targets the **Trust & Risk** track: safer financial decisions through evidence collection, control monitoring, human approval, auditable AI context, and defensible risk explanations. It is still a useful small-business bookkeeper, but bookkeeping records become the evidence layer for trust decisions rather than an excuse to let an agent act autonomously.
 
 ## Judge quick start
 
@@ -33,6 +35,20 @@ Run tests:
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
+
+## Ask PayProof runtime AI
+
+Ask PayProof always calculates totals and findings with deterministic Python code. With no model configuration it clearly displays **LOCAL FALLBACK** and remains fully usable. To enable a live OpenAI-compatible Chat Completions endpoint, set these values in `.env`:
+
+```text
+PAYPROOF_MODEL_BASE_URL=http://127.0.0.1:your-port/v1
+PAYPROOF_MODEL_API_KEY=your-runtime-key
+PAYPROOF_MODEL=your-model-name
+```
+
+The model receives a bounded packet containing the question, deterministic answer, evidence IDs, and calculation. If the model times out or returns invalid data, PayProof preserves the deterministic answer and reports fallback mode. GIDE's development model is separate and is not automatically inherited by PayProof.
+
+Useful chat checks include “What changed?”, “Show money in and money out,” “Which employee expense reports need review?”, “Find duplicates,” and “How much did I spend at Amazon?” in the Personal Example workspace.
 
 ## Sources and privacy
 

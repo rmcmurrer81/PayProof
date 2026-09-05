@@ -19,7 +19,7 @@ class PayProofCoreTests(unittest.TestCase):
         dashboard = core.get_dashboard("business")
         self.assertEqual(dashboard["metrics"]["transaction_count"], 105)
         self.assertEqual(dashboard["metrics"]["recorded_spending"], sum(t["amount_cents"] for t in dashboard["transactions"]))
-        self.assertEqual(len(dashboard["emails"]), 4)
+        self.assertEqual(len(dashboard["emails"]), 5)
         self.assertTrue(all(email["is_synthetic"] for email in dashboard["emails"]))
         self.assertEqual(len(dashboard["employees"]), 3)
         self.assertEqual(len(dashboard["expenses"]), 4)
@@ -40,6 +40,32 @@ class PayProofCoreTests(unittest.TestCase):
         self.assertGreater(answer.calculation["money_in_cents"], 0)
         self.assertGreater(answer.calculation["money_out_cents"], 0)
 
+    def test_instructions_inside_evidence_cannot_bypass_controls(self):
+        answer = core.answer_question("Did you detect prompt injection?", "business")
+        self.assertEqual(answer.calculation["actions_executed"], 0)
+        self.assertIn("untrusted evidence", answer.answer)
+        dashboard = core.get_dashboard("business")
+        route = next(f for f in dashboard["findings"] if f["id"] == "F-ROUTE-001")
+        self.assertEqual(route["status"], "open")
+
+    def test_security_questionnaire_answers_are_evidence_backed_and_honest(self):
+        dashboard = core.get_dashboard("business")
+        self.assertEqual(dashboard["security"]["metrics"]["controls_assessed"], 7)
+        self.assertEqual(dashboard["security"]["metrics"]["gaps"], 2)
+        mfa = core.answer_question("Is MFA enabled?", "business")
+        self.assertIn("16 of 18", mfa.answer)
+        self.assertEqual(mfa.calculation["status"], "partial")
+        self.assertGreaterEqual(len(mfa.evidence_ids), 2)
+        backups = core.answer_question("How often are backups performed?", "business")
+        self.assertIn("two later jobs failed", backups.answer)
+        followup = core.answer_question("Why?", "business", "control:CTRL-BACKUP")
+        self.assertIn("conflicts", followup.answer)
+
+    def test_unknown_security_answer_is_not_invented(self):
+        result = core.answer_question("Do you have ISO 27001 certification?", "business")
+        self.assertTrue(result.answer.startswith("Unknown."))
+        self.assertEqual(result.evidence_ids, [])
+
     def test_destination_change_is_high_risk_and_evidence_grounded(self):
         dashboard = core.get_dashboard("business")
         finding = next(f for f in dashboard["findings"] if f["kind"] == "destination_change")
@@ -59,6 +85,13 @@ class PayProofCoreTests(unittest.TestCase):
             t["amount_cents"] for t in core.get_dashboard("personal")["transactions"]
             if core.normalize_merchant(t["merchant_raw"]) == "amazon"
         ))
+
+    def test_spending_cut_suggestion_uses_history_and_discloses_uncertainty(self):
+        result = core.answer_question("Where could I cut spending?", "personal")
+        self.assertIn("prior monthly baseline", result.answer)
+        self.assertIn("suggestion, not a conclusion", result.answer)
+        self.assertGreater(result.calculation["increase_cents"], 0)
+        self.assertGreater(len(result.evidence_ids), 0)
 
     def test_csv_preview_commit_duplicate_and_remove(self):
         content = "id,merchant,amount,currency,date,office\nTX-IMPORT-1,Acme Parts,99.95,USD,2026-09-05,New York\n"
@@ -88,6 +121,20 @@ class PayProofCoreTests(unittest.TestCase):
         with patch.dict(os.environ, {"PRISMTRACE_PROJECT_ID": "", "PRISMTRACE_API_KEY": ""}, clear=False):
             result = core.send_prism_trace("test", core.ChatResult("answer", [], []), "session", 3, "business")
         self.assertEqual(result["state"], "not_configured")
+
+    def test_runtime_model_fallback_and_bounded_live_response(self):
+        base = core.ChatResult("Deterministic answer", ["SRC-1"], ["invoice:1"], {"total": 42})
+        with patch.dict(os.environ, {"PAYPROOF_MODEL_BASE_URL": "", "PAYPROOF_MODEL_API_KEY": ""}, clear=False):
+            unchanged, status = core.explain_with_runtime_model("Explain it", base)
+        self.assertEqual(status["state"], "deterministic_fallback")
+        self.assertEqual(unchanged.answer, "Deterministic answer")
+        fake_response = unittest.mock.MagicMock()
+        fake_response.__enter__.return_value.read.return_value = json.dumps({"choices": [{"message": {"content": "Grounded model explanation"}}]}).encode()
+        with patch.dict(os.environ, {"PAYPROOF_MODEL_BASE_URL": "http://model.test/v1", "PAYPROOF_MODEL_API_KEY": "test", "PAYPROOF_MODEL": "test-model"}, clear=False), patch("urllib.request.urlopen", return_value=fake_response):
+            enhanced, status = core.explain_with_runtime_model("Explain it", base)
+        self.assertEqual(status["state"], "live_model")
+        self.assertEqual(enhanced.answer, "Grounded model explanation")
+        self.assertEqual(enhanced.evidence_ids, ["SRC-1"])
 
 
 class PayProofApiTests(unittest.TestCase):
