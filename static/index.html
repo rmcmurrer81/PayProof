@@ -22,7 +22,7 @@
         </div>
       </div>
       <div class="top-status">
-        <label class="workspace-picker"><span>WORKSPACE</span><select id="workspaceSelect" aria-label="Workspace"></select></label>
+        <label class="workspace-picker"><span>SWITCH COMPANY</span><select id="workspaceSelect" aria-label="Switch company"></select></label>
         <span id="workspaceTypePill" class="pill cyan">SYNTHETIC EXAMPLE</span>
         <span id="prismPill" class="pill muted"><i></i> PRISM CHECKING</span>
         <button id="importOpen" class="button ghost">＋ Import</button>
@@ -37,6 +37,7 @@
         <button class="active" data-view="atlas"><span>◉</span><b>Atlas</b><small>3D evidence graph</small></button>
         <button data-view="change"><span>↗</span><b>Readiness</b><small>Control analysis</small></button>
         <button data-view="geo"><span>⌖</span><b>Coverage</b><small>Sources & owners</small></button>
+        <button data-view="people"><span>♙</span><b>People & spending</b><small>Employee reports</small></button>
         <button data-view="records"><span>▦</span><b>Evidence</b><small>Source records</small></button>
       </nav>
       <div class="rail-divider"></div>
@@ -50,7 +51,7 @@
     <main class="command-center">
       <section class="hero-line">
         <div><div class="eyebrow"><span id="activeCompanyContext">MERIDIAN WORKS</span> · LIVE TRUST &amp; RISK CONTEXT</div><h2 id="viewTitle">Security assurance atlas</h2></div>
-        <div class="hero-actions"><span id="updatedAt">Loading…</span><button id="refreshButton" class="icon-button" title="Refresh">↻</button></div>
+        <div class="hero-actions"><span id="offlineStatus" class="offline-indicator hidden" role="alert"><i aria-hidden="true"></i> OFFLINE · ONLINE REFRESH PAUSED</span><label class="auto-refresh-control"><span>AUTO REFRESH</span><select id="autoRefreshSelect" aria-label="Automatic refresh interval"><option value="5">Every 5 min</option><option value="10">Every 10 min</option></select></label><span id="updatedAt" class="live-update" role="status" aria-live="polite"><i aria-hidden="true"></i> Loading…</span><button id="refreshButton" class="icon-button" title="Refresh company data" aria-label="Refresh company data">↻</button></div>
       </section>
 
       <section id="metrics" class="metrics"></section>
@@ -64,6 +65,7 @@
           <canvas id="atlasCanvas" aria-label="Interactive financial relationship map"></canvas>
           <div id="changeView" class="change-view hidden"></div>
           <div id="geoView" class="geo-view hidden"></div>
+          <div id="peopleView" class="people-view hidden"></div>
           <div id="recordsView" class="records-view hidden"></div>
           <div class="canvas-tools"><button id="zoomOut" title="Zoom out">−</button><button id="zoomReset" title="Reset view">◎</button><button id="zoomIn" title="Zoom in">＋</button></div>
           <div id="selectionCard" class="selection-card"></div>

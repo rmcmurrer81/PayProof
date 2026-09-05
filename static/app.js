@@ -1,15 +1,18 @@
-const state={data:null,workspace:'business',view:new URLSearchParams(location.search).get('view')||'atlas',selectedId:'invoice:INV-1007',selectedFinding:'F-ROUTE-001',zoom:1,pan:{x:0,y:0},yaw:-.32,nodes:[],sessionId:`payproof-${Date.now()}`,lastContext:null,demoStep:0,sourceConfig:null,bankPreview:null,activePlaidHandler:null,oauthPoll:null,loadGeneration:0,sourceGeneration:0,workspaceGeneration:0,chatPending:false,changeCurrencyByWorkspace:{},voice:{recognition:null,inputAvailable:false,micState:'off',spokenReplies:false,replyVoice:null,statusMessage:'',voicesBound:false}};
+const state={data:null,workspace:'business',view:new URLSearchParams(location.search).get('view')||'atlas',selectedId:'invoice:INV-1007',selectedFinding:'F-ROUTE-001',zoom:1,pan:{x:0,y:0},yaw:-.32,nodes:[],sessionId:`payproof-${Date.now()}`,lastContext:null,demoStep:0,sourceConfig:null,bankPreview:null,activePlaidHandler:null,oauthPoll:null,loadGeneration:0,sourceGeneration:0,workspaceGeneration:0,chatPending:false,refreshInProgress:false,lastUpdatedAt:null,lastRefreshSummary:'',networkProblem:false,refreshAfterReconnect:false,metricValuesByWorkspace:{},autoRefreshMinutes:readAutoRefreshMinutes(),nextAutoRefreshAt:null,autoRefreshTimer:null,autoRefreshRunning:false,readinessFilter:null,changeCurrencyByWorkspace:{},outsideResearchQueryByWorkspace:{},outsideResearchResultsByWorkspace:{},voice:{recognition:null,inputAvailable:false,micState:'off',spokenReplies:false,replyVoice:null,statusMessage:'',voicesBound:false}};
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const riskColor={clear:'#3cf0a5',review:'#ffc64d',high:'#ff5274'};
 const money=(cents,currency='USD')=>new Intl.NumberFormat('en-US',{style:'currency',currency}).format(cents/100);
 const api=async(url,options={})=>{
-  const response=await fetch(url,options);
+  let response;
+  try{response=await fetch(url,options)}catch(error){markNetworkProblem();throw error}
+  if(state.networkProblem&&navigator.onLine)markConnectionRestored();
   let body={};
   try{body=await response.json()}catch{body={error:`The server returned an unreadable response (${response.status}).`}}
   if(!response.ok){const error=new Error(body.error||body.errors?.join(', ')||`Request failed (${response.status})`);error.payload=body;error.status=response.status;throw error}
   return body;
 };
 const jsonRequest=(method,payload)=>({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+function readAutoRefreshMinutes(){try{const value=Number.parseInt(localStorage.getItem('payproof-auto-refresh-minutes')||'5',10);return [5,10].includes(value)?value:5}catch{return 5}}
 
 function workspaceInitials(name){
   const words=String(name||'Company').trim().split(/\s+/).filter(Boolean);
@@ -24,6 +27,73 @@ function safeWebsiteUrl(value){
     if(!['http:','https:'].includes(url.protocol)||url.username||url.password)return null;
     return url.href;
   }catch{return null}
+}
+function safeResearchUrl(value){
+  const raw=String(value||'').trim();
+  if(!/^https?:\/\//i.test(raw))return null;
+  try{
+    const url=new URL(raw);
+    if(!['http:','https:'].includes(url.protocol)||url.username||url.password)return null;
+    return url.href;
+  }catch{return null}
+}
+function outsideResearchItems(data=state.data,workspace=state.workspace){
+  const saved=Array.isArray(data?.web_evidence)?data.web_evidence:[];
+  const recent=Array.isArray(state.outsideResearchResultsByWorkspace[workspace])?state.outsideResearchResultsByWorkspace[workspace]:[];
+  const seen=new Set();
+  return [...saved,...recent].filter(item=>{
+    if(!item||typeof item!=='object')return false;
+    const key=String(item.id||item.url||`${item.title||''}|${item.retrieved_at||''}`);
+    if(seen.has(key))return false;
+    seen.add(key);
+    return true;
+  });
+}
+function outsideResearchNodeId(item,index){
+  const raw=String(item?.id||`lead-${index+1}`);
+  return raw.startsWith('web:')?raw:`web:${raw}`;
+}
+function outsideResearchExcerpt(item){return String(item?.content??item?.snippet??'')}
+function addOutsideResearchToGraph(data){
+  const graph=data?.graph,items=outsideResearchItems(data);
+  if(!graph||!Array.isArray(graph.nodes)||!Array.isArray(graph.edges)||!items.length)return;
+  const workspaceNode=graph.nodes.find(node=>node.type==='workspace');
+  if(!workspaceNode)return;
+  items.slice(0,12).forEach((item,index)=>{
+    const id=outsideResearchNodeId(item,index);
+    if(!graph.nodes.some(node=>String(node.id)===id)){
+      const safeUrl=safeResearchUrl(item.url),host=safeUrl?new URL(safeUrl).hostname.replace(/^www\./i,''):'';
+      graph.nodes.push({id,type:'web',label:String(item.title||host||'Outside research lead').slice(0,46),risk:'review',size:7,source:item.source_label||'Tavily · outside research'});
+    }
+    if(!graph.edges.some(edge=>String(edge.target)===id))graph.edges.push({source:workspaceNode.id,target:id,risk:'review'});
+  });
+}
+function findOutsideResearch(ref){
+  const wanted=String(ref||'');
+  return outsideResearchItems().find((item,index)=>String(item.id||'')===wanted||outsideResearchNodeId(item,index)===wanted)||null;
+}
+function outsideResearchDefaultQuery(currentWorkspace){
+  const vendors=Array.isArray(state.data?.vendors)?state.data.vendors:[],invoices=Array.isArray(state.data?.invoices)?state.data.invoices:[],findings=Array.isArray(state.data?.findings)?state.data.findings:[];
+  const selectedPart=String(state.selectedId||'').split(':').slice(1).join(':');
+  const finding=findings.find(item=>String(item.id)===String(state.selectedFinding));
+  const candidateIds=[selectedPart,finding?.entity_id].filter(Boolean).map(value=>String(value).toLowerCase());
+  let vendor=vendors.find(item=>candidateIds.includes(String(item.id||'').toLowerCase())||candidateIds.includes(String(item.name||'').toLowerCase()));
+  if(!vendor){
+    const invoice=invoices.find(item=>candidateIds.includes(String(item.id||'').toLowerCase()));
+    if(invoice)vendor=vendors.find(item=>String(item.id||'').toLowerCase()===String(invoice.vendor_id||'').toLowerCase());
+  }
+  const subject=String(vendor?.name||currentWorkspace?.name||'').trim();
+  return subject?`${subject} company registration`:'';
+}
+function outsideResearchCardHtml(item){
+  const safeUrl=safeResearchUrl(item.url),title=String(item.title||'Untitled outside result'),source=String(item.source_label||'Tavily · outside research');
+  const host=safeUrl?new URL(safeUrl).hostname.replace(/^www\./i,''):'Link unavailable';
+  const titleHtml=safeUrl?`<a class="research-lead-link" href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer nofollow">${escapeHtml(title)} <span aria-hidden="true">↗</span></a>`:`<strong class="research-lead-title">${escapeHtml(title)}</strong>`;
+  return `<article class="research-lead"><div class="research-lead-head"><span class="status-chip warn">unverified lead</span><span>${escapeHtml(host)}</span></div>${titleHtml}${safeUrl?'':'<p class="unsafe-link-note">The link was hidden because it was not a safe public web address.</p>'}<details class="research-lead-details"><summary>View excerpt and search details</summary><div><p>${escapeHtml(outsideResearchExcerpt(item)||'No excerpt was returned.')}</p><dl><div><dt>Search used</dt><dd>${escapeHtml(item.query||'Not recorded')}</dd></div><div><dt>Found</dt><dd>${escapeHtml(readableTime(item.retrieved_at))}</dd></div><div><dt>Source</dt><dd>${escapeHtml(source)}</dd></div></dl><small>Outside page text is treated as untrusted. Check the original page and an authoritative record before relying on it.</small></div></details></article>`;
+}
+function outsideResearchCardsHtml(items){
+  if(!items.length)return '<p class="empty-state">No outside research has been saved for this company.</p>';
+  return items.slice(0,30).map(outsideResearchCardHtml).join('');
 }
 function safeCompanyLogoUrl(value,workspaceId){
   const raw=String(value||'').trim();
@@ -70,23 +140,119 @@ function renderActiveCompanyBranding(){
   document.title=`PayProof Atlas · ${name}`;
 }
 
-async function loadData(){
-  const workspace=state.workspace,generation=++state.loadGeneration;
-  const data=await api(`/api/dashboard?workspace=${encodeURIComponent(workspace)}`);
-  if(workspace!==state.workspace||generation!==state.loadGeneration)return false;
-  state.data=data;
-  if(state.workspace==='business'&&state.data.security?.graph?.nodes?.length)state.data.graph=state.data.security.graph;
-  renderWorkspaceOptions();renderActiveCompanyBranding();renderMetrics();renderFindings();renderFocus();renderVisual();renderPrism();syncNav();
-  $('#updatedAt').textContent=`Updated ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`;
-  return true;
+function setRefreshStatus(message,tone=''){
+  const label=$('#updatedAt');if(!label)return;
+  const dot=document.createElement('i');dot.setAttribute('aria-hidden','true');
+  label.replaceChildren(dot,document.createTextNode(` ${message}`));label.className=`live-update ${tone}`.trim();
+}
+function markNetworkProblem(){
+  state.networkProblem=true;const indicator=$('#offlineStatus');
+  if(indicator){indicator.classList.remove('hidden','restored');indicator.innerHTML='<i aria-hidden="true"></i> OFFLINE · ONLINE REFRESH PAUSED'}
+  setRefreshStatus('Offline · bank and Gmail refresh are paused','error');
+}
+function markConnectionRestored(){
+  const wasDown=state.networkProblem;state.networkProblem=false;
+  const indicator=$('#offlineStatus');if(indicator){indicator.classList.remove('hidden');indicator.classList.add('restored');indicator.innerHTML='<i aria-hidden="true"></i> ONLINE · REFRESHING NOW'}
+  if(wasDown)state.refreshAfterReconnect=true;
+  setTimeout(()=>{if(!state.networkProblem)indicator?.classList.add('hidden')},5000);
+}
+function updateElapsedLabel(){
+  if(state.networkProblem){setRefreshStatus(`Offline · ${state.lastRefreshSummary||'bank and Gmail refresh are paused'}`,'error');return}
+  if(!state.lastUpdatedAt||state.refreshInProgress)return;
+  const elapsed=Math.max(0,Math.floor((Date.now()-state.lastUpdatedAt)/1000));
+  const updated=elapsed<15?'Updated just now':elapsed<60?`Updated ${elapsed} seconds ago`:`Updated ${Math.floor(elapsed/60)} minute${elapsed<120?'':'s'} ago`;
+  const until=state.nextAutoRefreshAt?Math.max(0,Math.ceil((state.nextAutoRefreshAt-Date.now())/1000)):null;
+  const next=`next in ${Math.floor((until??0)/60)}:${String((until??0)%60).padStart(2,'0')}`;
+  setRefreshStatus(`${updated}${state.lastRefreshSummary?` · ${state.lastRefreshSummary}`:''} · ${next}`,state.lastRefreshSummary.includes('attention')?'error':'fresh');
+}
+async function loadData(activity='Refreshing…'){
+  const workspace=state.workspace,generation=++state.loadGeneration,refreshButton=$('#refreshButton');
+  state.refreshInProgress=true;
+  setRefreshStatus(typeof activity==='string'?activity:'Refreshing…','refreshing');
+  if(refreshButton){refreshButton.disabled=true;refreshButton.classList.add('refreshing')}
+  try{
+    const data=await api(`/api/dashboard?workspace=${encodeURIComponent(workspace)}`);
+    if(workspace!==state.workspace||generation!==state.loadGeneration)return false;
+    state.data=data;
+    if(state.workspace==='business'&&state.data.security?.graph?.nodes?.length)state.data.graph=state.data.security.graph;
+    addOutsideResearchToGraph(state.data);
+    renderWorkspaceOptions();renderActiveCompanyBranding();renderMetrics();renderFindings();renderFocus();renderVisual();renderPrism();syncNav();
+    if(state.lastRefreshSummary==='refresh needs attention')state.lastRefreshSummary='';
+    state.lastUpdatedAt=Date.now();scheduleNextAutoRefresh();updateElapsedLabel();
+    return true;
+  }catch(error){
+    if(workspace===state.workspace&&generation===state.loadGeneration){state.lastRefreshSummary='refresh needs attention';setRefreshStatus('Refresh needs attention','error')}
+    throw error;
+  }finally{
+    if(generation===state.loadGeneration){state.refreshInProgress=false;if(refreshButton){refreshButton.disabled=false;refreshButton.classList.remove('refreshing')}updateElapsedLabel()}
+  }
+}
+function scheduleNextAutoRefresh(delayMs=null){
+  state.nextAutoRefreshAt=Date.now()+(delayMs??state.autoRefreshMinutes*60000);
+}
+function autoRefreshBlocked(){return document.hidden||!$('#drawer')?.classList.contains('hidden')||state.chatPending||state.activePlaidHandler||state.voice.recognition}
+async function runAutoRefresh(force=false){
+  if(state.autoRefreshRunning||state.refreshInProgress)return;
+  if(!navigator.onLine){
+    markNetworkProblem();if(autoRefreshBlocked()){scheduleNextAutoRefresh(30000);return}
+    const workspace=state.workspace;state.autoRefreshRunning=true;
+    try{await api('/api/sources/intake/scan',jsonRequest('POST',{workspace}));if(workspace===state.workspace){state.lastRefreshSummary='local folders refreshed · online sources paused';await loadData('Refreshing local folder records…');setRefreshStatus('Offline · local folders refreshed; bank and Gmail are paused','error')}}catch{setRefreshStatus('Offline · online sources paused; local folder refresh needs attention','error')}finally{state.autoRefreshRunning=false;scheduleNextAutoRefresh()}
+    return;
+  }
+  if(autoRefreshBlocked()){if(force)state.refreshAfterReconnect=true;if(state.autoRefreshMinutes)scheduleNextAutoRefresh(30000);setRefreshStatus('Auto refresh is waiting while you finish this task','waiting');return}
+  const workspace=state.workspace;state.autoRefreshRunning=true;state.refreshInProgress=true;setRefreshStatus('Auto refreshing this company…','refreshing');
+  const tasks=[];
+  try{
+    const sources=await api(`/api/sources?workspace=${encodeURIComponent(workspace)}`),bank=sources.bank||{},gmail=sources.gmail||{};
+    (bank.connections||[]).filter(connection=>connection.state==='connected').forEach(connection=>tasks.push({label:`${connection.institution||'Bank'} sync`,run:()=>api(`/api/sources/bank/${encodeURIComponent(connection.id)}/sync`,jsonRequest('POST',{workspace}))}));
+    if(gmail.connected)tasks.push({label:'Gmail import',run:()=>api('/api/sources/gmail/import',jsonRequest('POST',{workspace,query:'newer_than:365d (from:amazon.com OR category:purchases)',max_results:20}))});
+    tasks.push({label:'Intake scan',run:()=>api('/api/sources/intake/scan',jsonRequest('POST',{workspace}))});
+    const settled=await Promise.allSettled(tasks.map(task=>task.run()));
+    if(workspace!==state.workspace)return;
+    const succeeded=settled.filter(result=>result.status==='fulfilled').length,failed=settled.length-succeeded;
+    state.lastRefreshSummary=`${succeeded} source${succeeded===1?'':'s'} refreshed${failed?` · ${failed} need attention`:''}`;
+    state.refreshInProgress=false;await loadData('Updating the dashboard…');state.refreshAfterReconnect=false;
+  }catch(error){
+    if(workspace===state.workspace){state.lastRefreshSummary='source refresh needs attention';state.refreshInProgress=false;if(state.networkProblem){state.refreshAfterReconnect=false;scheduleNextAutoRefresh(30000)}else{try{await loadData('Reloading saved records…')}catch{}}setRefreshStatus(state.networkProblem?'Offline · bank and Gmail refresh are paused':`Auto refresh needs attention: ${error.message}`,'error')}
+  }finally{state.autoRefreshRunning=false;state.refreshInProgress=false;if(!state.nextAutoRefreshAt)scheduleNextAutoRefresh();updateElapsedLabel()}
+}
+function setupAutoRefresh(){
+  const select=$('#autoRefreshSelect');select.value=String(state.autoRefreshMinutes);
+  select.onchange=()=>{const minutes=Number.parseInt(select.value,10);state.autoRefreshMinutes=[5,10].includes(minutes)?minutes:5;try{localStorage.setItem('payproof-auto-refresh-minutes',String(state.autoRefreshMinutes))}catch{}state.lastRefreshSummary='';scheduleNextAutoRefresh();updateElapsedLabel()};
+  scheduleNextAutoRefresh();state.autoRefreshTimer=setInterval(()=>{if(state.refreshAfterReconnect&&!autoRefreshBlocked()&&navigator.onLine)runAutoRefresh(true);else if(state.nextAutoRefreshAt&&Date.now()>=state.nextAutoRefreshAt)runAutoRefresh();else updateElapsedLabel()},1000);
+}
+function setupConnectivity(){
+  if(!navigator.onLine)markNetworkProblem();
+  window.addEventListener('offline',markNetworkProblem);
+  window.addEventListener('online',()=>{markConnectionRestored();if(autoRefreshBlocked())state.refreshAfterReconnect=true;else runAutoRefresh(true)});
 }
 function renderWorkspaceOptions(){const el=$('#workspaceSelect'),fragment=document.createDocumentFragment();(state.data?.workspaces||[]).forEach(workspace=>{const option=document.createElement('option');option.value=workspace.id;option.textContent=workspace.name;fragment.append(option)});el.replaceChildren(fragment);el.value=state.workspace}
-function renderMetrics(){if(state.workspace==='business'){const s=state.data.security.metrics;$('#metrics').innerHTML=[['Controls assessed',s.controls_assessed,'QUESTIONNAIRE CONTROLS','green'],['Control gaps',s.gaps,'OPERATING FAILURES','red'],['Needs review',s.needs_review,'INCOMPLETE OR CONFLICTING','amber'],['Evidence sources',s.evidence_sources,'CITED RECORDS','']].map(x=>`<article class="metric ${x[3]}"><span>${x[0].toUpperCase()}</span><strong>${x[1]}</strong><small>${x[2]}</small></article>`).join('');return}const m=state.data.metrics;$('#metrics').innerHTML=[
-  ['Money in',m.cash_in_label,'RECORDED INCOME','green'],
-  ['Money out',m.cash_out_label,`${m.transaction_count} TRANSACTIONS`,'amber'],
-  ['Net cash',m.net_cash_label,'INCOME MINUS OUTFLOW',''],
-  ['Employee spend',m.employee_spend_label,`${state.data.expenses.length} REPORTS`,'red']
-].map(x=>`<article class="metric ${x[3]}"><span>${x[0].toUpperCase()}</span><strong>${x[1]}</strong><small>${x[2]}</small></article>`).join('')}
+function metricButtonHtml(label,value,note,tone,action,changed=false){return `<button type="button" class="metric ${tone} ${changed?'value-changed':''}" data-metric-action="${action}" aria-label="${escapeHtml(label)}: ${escapeHtml(value)}. Open ${action==='people'?'people and spending':action==='records'?'evidence':'readiness'}"><span>${escapeHtml(label.toUpperCase())}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(note)}</small><i aria-hidden="true">Open →</i></button>`}
+function bindMetricActions(){$$('[data-metric-action]').forEach(button=>button.onclick=()=>activateMetric(button.dataset.metricAction))}
+function renderMetricItems(items){
+  const previous=state.metricValuesByWorkspace[state.workspace]||{},next={};
+  $('#metrics').innerHTML=items.map(item=>{const [label,value]=item,key=label.toLowerCase().replaceAll(' ','_');next[key]=String(value);return metricButtonHtml(...item,previous[key]!==undefined&&previous[key]!==String(value))}).join('');
+  state.metricValuesByWorkspace[state.workspace]=next;
+}
+function renderMetrics(){
+  if(state.workspace==='business'){
+    const s=state.data.security.metrics;
+    renderMetricItems([['Controls assessed',s.controls_assessed,'QUESTIONNAIRE CONTROLS','green','readiness'],['Control gaps',s.gaps,'OPERATING FAILURES','red','gaps'],['Needs review',s.needs_review,'INCOMPLETE OR UNKNOWN','amber','review'],['Evidence sources',s.evidence_sources,'CITED RECORDS','','records']]);
+  }else{
+    const m=state.data.metrics;
+    renderMetricItems([['Money in',m.cash_in_label,'RECORDED INCOME','green','readiness'],['Money out',m.cash_out_label,`${m.transaction_count} TRANSACTIONS`,'amber','readiness'],['Net cash',m.net_cash_label,'INCOME MINUS OUTFLOW','','readiness'],['Employee spend',m.employee_spend_label,`${state.data.expenses.length} REPORTS`,'red','people']]);
+  }
+  bindMetricActions();
+}
+function activateMetric(action){
+  state.readinessFilter=action==='gaps'?'gap':action==='review'?'review':null;
+  state.view=action==='people'?'people':action==='records'?'records':'change';
+  if(state.workspace==='business'&&state.readinessFilter){
+    const controls=state.data.security?.controls||[],match=controls.find(control=>state.readinessFilter==='gap'?control.status==='gap':['partial','review'].includes(control.status));
+    if(match){state.selectedId=`control:${match.id}`;renderFocus()}
+  }
+  syncNav();renderVisual();
+}
 function renderFindings(){const rail=$('#findingRail');if(state.workspace==='business'){rail.innerHTML=state.data.security.controls.map(c=>`<button class="finding-mini ${c.status==='gap'?'high':''}" data-control="${c.id}"><i></i><span><b>${escapeHtml(c.name)}</b><small>${c.confidence}% confidence</small></span><strong>${c.status.toUpperCase()}</strong></button>`).join('');$$('[data-control]').forEach(b=>b.onclick=()=>selectControl(b.dataset.control));return}rail.innerHTML=state.data.findings.slice(0,4).map(f=>`<button class="finding-mini ${f.severity}" data-finding="${f.id}"><i></i><span><b>${f.title}</b><small>${f.entity_id}</small></span><strong>${f.severity.toUpperCase()}</strong></button>`).join('');$$('[data-finding]').forEach(b=>b.onclick=()=>selectFinding(b.dataset.finding))}
 function selectControl(id){const c=state.data.security.controls.find(x=>x.id===id);state.selectedId=`control:${id}`;$('#focusTitle').textContent=`${c.status.toUpperCase()} · ${c.name}`;$('#focusSummary').textContent=`${c.answer} ${c.contradiction}`;$('#comparison').innerHTML=`<div class="compare-value"><span>CONFIDENCE</span><strong>${c.confidence}%</strong></div><div class="compare-value new"><span>EVIDENCE</span><strong>${c.evidence.length}</strong></div>`;drawAtlas();openRecord(state.selectedId)}
 function selectFinding(id){state.selectedFinding=id;const f=state.data.findings.find(x=>x.id===id);if(f){state.selectedId=`invoice:${f.entity_id}`;if(f.entity_id.startsWith('TX-'))state.selectedId=`transaction:${f.entity_id}`;renderFocus();renderVisual();addMessage('assistant',`${f.title}: ${f.summary}`,[...f.evidence_ids])}}
@@ -94,12 +260,12 @@ function renderFocus(){if(state.workspace==='business'&&state.data.security?.con
 function renderPrism(){const p=state.data.prism,el=$('#prismPill');el.className=`pill ${p.state==='configured'?'good':'muted'}`;el.innerHTML=`<i></i> PRISM ${p.state==='configured'?'CONFIGURED':'NEEDS KEY'}${p.queued?` · ${p.queued} QUEUED`:''}`;const badge=$('.assistant-badges span');if(badge)badge.textContent=state.data.ai.state==='configured'?`LIVE MODEL · ${state.data.ai.model}`:'LOCAL FALLBACK'}
 
 function renderVisual(){
-  ['atlasCanvas','changeView','geoView','recordsView'].forEach(id=>$(`#${id}`).classList.add('hidden'));
-  const security=state.workspace==='business',titles=security?{atlas:['Security assurance atlas','3D controls and evidence'],change:['Control readiness','Gaps and contradictions'],geo:['Evidence coverage','Systems and stakeholders'],records:['Security evidence','Questionnaire source records']}:{atlas:['Money relationship atlas','Financial relationships'],change:['Explain the change','Period-over-period financial movement'],geo:['Financial geography','Office and vendor locations'],records:['Evidence explorer','Loaded financial records']};
+  ['atlasCanvas','changeView','geoView','peopleView','recordsView'].forEach(id=>$(`#${id}`).classList.add('hidden'));
+  const security=state.workspace==='business',titles=security?{atlas:['Security assurance atlas','3D controls and evidence'],change:['Control readiness','Gaps and contradictions'],geo:['Evidence coverage','Systems and stakeholders'],people:['People & spending','Employee report review'],records:['Security evidence','Questionnaire source records']}:{atlas:['Money relationship atlas','Financial relationships'],change:['Explain the change','Period-over-period financial movement'],geo:['Financial geography','Office and vendor locations'],people:['People & spending','Employee report review'],records:['Evidence explorer','Loaded financial records']};
   $('#viewTitle').textContent=titles[state.view][0];$('#panelTitle').textContent=titles[state.view][1];
   $(`#${state.view==='atlas'?'atlasCanvas':state.view+'View'}`).classList.remove('hidden');
   $('.canvas-tools').classList.toggle('hidden',state.view!=='atlas');
-  if(state.view==='atlas')drawAtlas();if(state.view==='change')renderChange();if(state.view==='geo')renderGeo();if(state.view==='records')renderRecords();
+  if(state.view==='atlas')drawAtlas();if(state.view==='change')renderChange();if(state.view==='geo')renderGeo();if(state.view==='people')renderPeople();if(state.view==='records')renderRecords();
 }
 function layoutNodes(width,height){
   const source=state.data.graph.nodes.map(n=>({...n})), center=source.find(n=>n.type==='workspace');center.x=width*.45;center.y=height*.5;
@@ -113,10 +279,13 @@ function drawAtlas(){requestAnimationFrame(()=>{const c=$('#atlasCanvas'),box=c.
   [...state.nodes].sort((a,b)=>(a.depth||0)-(b.depth||0)).forEach(n=>{const selected=n.id===state.selectedId, color=riskColor[n.risk]||'#3ed8ff',r=(n.size||9)*(n.depthScale||1);ctx.beginPath();ctx.arc(n.x,n.y,r+(selected?5:0),0,Math.PI*2);ctx.fillStyle='#061828';ctx.fill();ctx.lineWidth=selected?3:1.5;ctx.strokeStyle=selected?'#fff':color;ctx.shadowColor=color;ctx.shadowBlur=selected?22:10;ctx.stroke();ctx.shadowBlur=0;ctx.fillStyle=color;ctx.globalAlpha=.8;ctx.beginPath();ctx.arc(n.x,n.y,Math.max(3,r*.35),0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;ctx.fillStyle='#cdeeff';ctx.font=`${n.type==='workspace'?'bold 11':'9'}px Segoe UI`;ctx.textAlign='center';ctx.fillText(n.label,n.x,n.y+r+14)});ctx.restore()})}
 function renderChange(){
   if(state.workspace==='business'){
-    const controls=state.data.security.controls;
+    const allControls=state.data.security.controls;
+    const controls=state.readinessFilter==='gap'?allControls.filter(control=>control.status==='gap'):state.readinessFilter==='review'?allControls.filter(control=>['partial','review'].includes(control.status)):allControls;
+    const filterLabel=state.readinessFilter==='gap'?'Control gaps':state.readinessFilter==='review'?'Needs review':'All controls';
     const bars=controls.map(control=>`<div class="bar-col" style="height:${control.confidence}%"><strong>${control.confidence}%</strong><span>${escapeHtml(control.id.replace('CTRL-',''))}</span></div>`).join('');
     const changes=controls.map(control=>`<button class="change-row" data-control="${escapeHtml(control.id)}"><b>${escapeHtml(control.name)}</b><strong class="${control.status==='gap'?'up':'down'}">${escapeHtml(control.status.toUpperCase())}</strong><small>${escapeHtml(control.contradiction)}</small></button>`).join('');
-    $('#changeView').innerHTML=`<div class="period-grid"><div class="chart-card"><h4>Evidence confidence by control</h4><div class="bar-chart">${bars}</div></div><div class="chart-card"><h4>Gaps and contradictions</h4><div class="change-list">${changes}</div></div></div>`;
+    $('#changeView').innerHTML=`<div class="readiness-filter-row"><b>${filterLabel}</b>${state.readinessFilter?'<button id="showAllReadiness" class="button ghost">Show all controls</button>':''}</div><div class="period-grid"><div class="chart-card depth-card"><h4>Evidence confidence by control</h4><div class="bar-chart depth-bars">${bars||'<p class="empty-chart">No controls match this view.</p>'}</div></div><div class="chart-card depth-card"><h4>${filterLabel}</h4><div class="change-list">${changes||'<p class="empty-state">Nothing matches this view.</p>'}</div></div></div>`;
+    const showAll=$('#showAllReadiness');if(showAll)showAll.onclick=()=>{state.readinessFilter=null;renderChange()};
     $$('#changeView [data-control]').forEach(button=>button.onclick=()=>selectControl(button.dataset.control));
     return;
   }
@@ -143,10 +312,94 @@ function renderChange(){
   $$('#changeView [data-chart-currency]').forEach(button=>button.onclick=()=>{state.changeCurrencyByWorkspace[state.workspace]=button.dataset.chartCurrency;renderChange()});
   $$('#changeView [data-finding]').forEach(button=>button.onclick=()=>selectFinding(button.dataset.finding));
 }
-function renderGeo(){const vendors=state.data.vendors.filter(v=>v.city),groups={};vendors.forEach(v=>{groups[v.city]=groups[v.city]||[];groups[v.city].push(v)});const positions={'New York':[70,35],'Austin':[46,74],'Chicago':[52,47],'Seattle':[11,22],'San Francisco':[10,57],'San Jose':[12,61],'Boston':[82,28],'Memphis':[57,67],'Atlanta':[70,70]};const points=Object.entries(groups).map(([city,items])=>{const p=positions[city]||[50,50];return `<button class="map-point" style="left:${p[0]}%;top:${p[1]}%" data-city="${city}"><span>${city} · ${items.length}</span></button>`}).join('');const list=Object.entries(groups).map(([city,items])=>`<div class="change-row"><b>${city}</b><strong>${items.length}</strong><small>${items.map(v=>v.name).join(', ')}</small></div>`).join('');$('#geoView').innerHTML=`<div class="geo-grid"><div class="map-stage">${points}</div><div class="chart-card"><h4>Evidence-backed locations</h4><div class="change-list">${list}</div></div></div>`}
-function renderRecords(){if(state.workspace==='business'){const rows=state.data.security.evidence.map(e=>`<tr><td><button data-record="security:${e.id}">${e.id}</button></td><td>${escapeHtml(e.type)}</td><td>${escapeHtml(e.title)}</td><td>${escapeHtml(e.source)}</td><td>${e.as_of}</td><td>${escapeHtml(e.statement)}</td></tr>`).join('');$('#recordsView').innerHTML=`<table class="records-table"><thead><tr><th>Evidence</th><th>Type</th><th>Title</th><th>Source</th><th>As of</th><th>Observed statement</th></tr></thead><tbody>${rows}</tbody></table>`;$$('[data-record]').forEach(b=>b.onclick=()=>openRecord(b.dataset.record));return}const rows=state.data.transactions.slice(0,80).map(t=>`<tr><td><button data-record="transaction:${t.id}">${t.id}</button></td><td>${t.merchant_raw}</td><td>${money(t.amount_cents,t.currency)}</td><td>${t.occurred_on}</td><td>${t.office}</td><td>${t.source_id}</td></tr>`).join('');$('#recordsView').innerHTML=`<table class="records-table"><thead><tr><th>Record</th><th>Merchant</th><th>Amount</th><th>Date</th><th>Office</th><th>Evidence</th></tr></thead><tbody>${rows}</tbody></table>`;$$('[data-record]').forEach(b=>b.onclick=()=>openRecord(b.dataset.record))}
+function renderGeo(){
+  const vendors=(state.data.vendors||[]).filter(vendor=>vendor.city),groups={};
+  vendors.forEach(vendor=>{groups[vendor.city]=groups[vendor.city]||[];groups[vendor.city].push(vendor)});
+  const positions={'New York':[83,39],'Austin':[48,75],'Chicago':[61,38],'Seattle':[17,26],'San Francisco':[13,56],'San Jose':[14,60],'Boston':[88,31],'Memphis':[61,62],'Atlanta':[72,67]};
+  const entries=Object.entries(groups),arcs=entries.map(([city])=>{const [x,y]=positions[city]||[50,50],px=x*9,py=y*5.2;return `<path class="coverage-arc" d="M450 280 Q ${Math.round((450+px)/2)} ${Math.max(70,Math.round(py-90))} ${px} ${py}"/><circle class="coverage-pulse" cx="${px}" cy="${py}" r="5"/>`}).join('');
+  const points=entries.map(([city,items])=>{const [x,y]=positions[city]||[50,50];return `<button class="map-point" style="left:${x}%;top:${y}%" data-city="${escapeHtml(city)}" aria-label="Show ${escapeHtml(city)}, ${items.length} vendor${items.length===1?'':'s'}"><span>${escapeHtml(city)} · ${items.length}</span></button>`}).join('');
+  const cards=entries.map(([city,items])=>`<details class="coverage-location" data-city-card="${escapeHtml(city)}"><summary><span><b>${escapeHtml(city)}</b><small>${items.length} vendor${items.length===1?'':'s'} with a saved location</small></span><strong>${items.length}</strong></summary><div>${items.map(vendor=>`<button class="coverage-vendor" data-vendor-record="vendor:${escapeHtml(vendor.id)}"><span>${escapeHtml(vendor.name)}</span><small>Open saved vendor details</small></button>`).join('')}</div></details>`).join('');
+  $('#geoView').innerHTML=`<div class="geo-grid"><div class="map-stage coverage-map"><svg class="coverage-land" viewBox="0 0 900 520" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="landGlow" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#164d69"/><stop offset="1" stop-color="#071a2b"/></linearGradient><filter id="softGlow"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><path class="coverage-shadow" d="M74 75 L230 38 342 73 430 61 516 96 655 102 810 173 848 248 796 306 712 331 657 390 550 419 475 386 385 411 305 366 213 339 153 271 92 222 42 142Z"/><path class="coverage-continent" d="M66 62 L224 28 338 64 426 52 515 88 659 94 821 165 861 239 806 299 718 323 662 385 548 411 473 377 382 403 298 357 207 331 145 263 82 214 31 132Z"/><path class="coverage-topo" d="M100 119 C230 70 337 133 451 103 S678 135 787 193 M88 178 C219 131 326 193 438 164 S653 174 803 238 M143 247 C252 208 349 258 455 230 S651 239 744 294 M221 312 C340 285 418 328 531 300 S654 301 695 341"/>${arcs}</svg>${points}<div class="map-depth-label"><span>PUBLIC LOCATION VIEW</span><b>Saved cities and connections</b><small>Open a city, then inspect the vendor record.</small></div></div><section class="coverage-list"><div class="coverage-list-head"><span class="section-label">SAVED LOCATIONS</span><h4>${entries.length} cit${entries.length===1?'y':'ies'}</h4></div>${cards||'<p class="empty-state">No vendor locations are saved for this company.</p>'}</section></div>`;
+  $$('.map-point').forEach(button=>button.onclick=()=>{const card=$$('[data-city-card]').find(item=>item.dataset.cityCard===button.dataset.city);if(card){card.open=true;card.scrollIntoView({block:'nearest'});card.classList.add('highlight');setTimeout(()=>card.classList.remove('highlight'),900)}});
+  $$('.coverage-vendor').forEach(button=>button.onclick=()=>openRecord(button.dataset.vendorRecord));
+}
+function expenseTotalsLabel(expenses){
+  const totals={};
+  expenses.forEach(expense=>{const currency=String(expense.currency||'USD').toUpperCase();totals[currency]=(totals[currency]||0)+safeCount(expense.amount_cents)});
+  const entries=Object.entries(totals).sort(([left],[right])=>left.localeCompare(right));
+  return entries.length?entries.map(([currency,total])=>safeMoney(total,currency)).join(' + '):'No spending';
+}
+function employeeSpendingSummary(employee){
+  const reports=(state.data.expenses||[]).filter(expense=>String(expense.employee_id)===String(employee.id));
+  return {employee,reports,total:expenseTotalsLabel(reports),missing:reports.filter(expense=>expense.receipt_status==='missing').length,review:reports.filter(expense=>expense.approval_status==='needs_review').length};
+}
+function renderPeople(){
+  const employees=state.data.employees||[],summaries=employees.map(employeeSpendingSummary),allReports=state.data.expenses||[];
+  const missing=allReports.filter(expense=>expense.receipt_status==='missing').length,review=allReports.filter(expense=>expense.approval_status==='needs_review').length,maxReports=Math.max(1,...summaries.map(item=>item.reports.length));
+  const reviewShare=allReports.length?Math.round(review/allReports.length*100):0;
+  const bars=summaries.map(item=>`<button class="people-bar-button" data-person-record="${escapeHtml(item.employee.id)}" aria-label="Open ${escapeHtml(item.employee.name)}, ${item.reports.length} reports"><span class="people-bar" style="--bar-height:${Math.max(18,Math.round(item.reports.length/maxReports*100))}%"><i></i></span><b>${escapeHtml(item.employee.name)}</b><small>${item.reports.length} report${item.reports.length===1?'':'s'}</small></button>`).join('');
+  const cards=summaries.map(item=>`<article class="person-card ${item.missing||item.review?'needs-attention':''}"><button class="person-card-main" data-person-record="${escapeHtml(item.employee.id)}"><span><small>${escapeHtml([item.employee.department,item.employee.office].filter(Boolean).join(' · ')||'Employee')}</small><b>${escapeHtml(item.employee.name)}</b></span><strong>${escapeHtml(item.total)}</strong><i>Open person →</i></button><div class="person-stats"><span><b>${item.reports.length}</b> reports</span><span class="${item.missing?'warn':''}"><b>${item.missing}</b> missing receipts</span><span class="${item.review?'warn':''}"><b>${item.review}</b> need review</span></div><details class="person-reports"><summary>Show report list</summary><div>${item.reports.map(expense=>`<button data-expense-record="expense:${escapeHtml(expense.id)}"><span><b>${escapeHtml(expense.merchant||'Expense report')}</b><small>${escapeHtml(expense.spent_on||expense.date||'Date not saved')} · ${escapeHtml(String(expense.receipt_status||'unknown').replaceAll('_',' '))}</small></span><strong>${escapeHtml(safeMoney(expense.amount_cents,expense.currency))}</strong></button>`).join('')||'<p class="empty-state">No reports are attached to this person.</p>'}</div></details></article>`).join('');
+  $('#peopleView').innerHTML=`<div class="people-dashboard"><section class="people-overview depth-card"><div class="people-overview-copy"><span class="section-label">COMPANY-SCOPED VIEW</span><h4>${employees.length} people · ${allReports.length} reports</h4><p>Spending stays with the company selected above. Amounts in different currencies are kept separate.</p><div class="people-totals"><div><b>${escapeHtml(expenseTotalsLabel(allReports))}</b><span>Total employee spend</span></div><div><b>${missing}</b><span>Missing receipts</span></div><div><b>${review}</b><span>Need review</span></div></div></div><div class="review-dial" style="--review-share:${reviewShare}" role="img" aria-label="${reviewShare}% of reports need review"><div><b>${reviewShare}%</b><span>need review</span></div></div></section><section class="people-depth-chart depth-card" aria-label="Reports by employee"><div class="people-chart-head"><div><span class="section-label">REPORT VOLUME</span><h4>People at a glance</h4></div><small>Choose a name to open details</small></div><div class="people-bars">${bars||'<p class="empty-state">No employees are loaded for this company.</p>'}</div></section><section class="people-card-grid">${cards||'<p class="empty-state">No employee spending records are loaded for this company.</p>'}</section></div>`;
+  $$('#peopleView [data-person-record]').forEach(button=>button.onclick=()=>openPersonDetails(button.dataset.personRecord));
+  $$('#peopleView [data-expense-record]').forEach(button=>button.onclick=event=>{event.stopPropagation();openRecord(button.dataset.expenseRecord)});
+}
+function openPersonDetails(employeeId){
+  const employee=(state.data.employees||[]).find(item=>String(item.id)===String(employeeId));
+  if(!employee){toast('That person is no longer available in this company.');return}
+  const summary=employeeSpendingSummary(employee),reports=summary.reports.map(expense=>`<button class="person-drawer-report" data-expense-record="expense:${escapeHtml(expense.id)}"><span><b>${escapeHtml(expense.merchant||'Expense report')}</b><small>${escapeHtml(expense.spent_on||expense.date||'Date not saved')} · ${escapeHtml(String(expense.approval_status||'unknown').replaceAll('_',' '))}</small></span><strong>${escapeHtml(safeMoney(expense.amount_cents,expense.currency))}</strong></button>`).join('');
+  openDrawer('PEOPLE & SPENDING',employee.name,`<div class="person-drawer-summary"><strong>${escapeHtml(summary.total)}</strong><span>across ${summary.reports.length} report${summary.reports.length===1?'':'s'}</span></div><div class="person-stats"><span><b>${summary.missing}</b> missing receipts</span><span><b>${summary.review}</b> need review</span></div><details class="plain-details" open><summary>Show expense reports</summary><div class="person-drawer-reports">${reports||'<p class="empty-state">No reports are attached to this person.</p>'}</div></details><details class="plain-details"><summary>Show saved employee details</summary>${detailHtml(employee)}</details>`);
+  $$('#drawerContent [data-expense-record]').forEach(button=>button.onclick=()=>openRecord(button.dataset.expenseRecord));
+}
+function outsideResearchRecordsHtml(){
+  const items=outsideResearchItems();
+  if(!items.length)return '';
+  const rows=items.slice(0,80).map((item,index)=>{
+    const ref=outsideResearchNodeId(item,index),safeUrl=safeResearchUrl(item.url),host=safeUrl?new URL(safeUrl).hostname.replace(/^www\./i,''):'Link hidden';
+    const site=safeUrl?`<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer nofollow">${escapeHtml(host)} ↗</a>`:escapeHtml(host);
+    return `<tr class="unverified-web-row"><td><button data-research-record="${escapeHtml(ref)}">${escapeHtml(item.id||`Lead ${index+1}`)}</button></td><td>${escapeHtml(item.title||'Untitled outside result')}</td><td>${site}</td><td>${escapeHtml(item.source_label||'Tavily · outside research')}</td><td>${escapeHtml(readableTime(item.retrieved_at))}</td><td><span class="status-chip warn">unverified</span></td></tr>`;
+  }).join('');
+  return `<section class="web-records" aria-labelledby="webRecordsTitle"><div class="web-records-heading"><div><span class="section-label">OUTSIDE RESEARCH</span><h4 id="webRecordsTitle">Unverified leads</h4></div><p>These links may help a reviewer know where to look. They are not proof and do not close a finding.</p></div><div class="table-scroll"><table class="records-table"><thead><tr><th>Lead</th><th>Title</th><th>Site</th><th>Source</th><th>Found</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+}
+function findingRecordRef(finding){
+  const id=String(finding?.entity_id||'');
+  if(id.startsWith('INV-'))return `invoice:${id}`;if(id.startsWith('TX-'))return `transaction:${id}`;if(id.startsWith('EMAIL-'))return `email:${id}`;if(id.startsWith('EXP-'))return `expense:${id}`;return null;
+}
+function reviewQueueHtml(){
+  const findings=Array.isArray(state.data?.findings)?state.data.findings.filter(item=>item.status==='open'):[];
+  const cards=findings.slice(0,8).map(finding=>{const ref=findingRecordRef(finding),urgent=finding.severity==='high';return `<article class="review-document ${urgent?'urgent':''}"><div class="review-document-head"><span class="status-chip warn">possible fraud - review</span><span>not proof</span></div><h5>${escapeHtml(finding.title)}</h5><p>${escapeHtml(finding.summary)}</p><details><summary>Why PayProof raised this</summary><p>${escapeHtml(finding.basis||'The saved records contain a pattern that needs a person to check.')}</p><small>Evidence references: ${escapeHtml((finding.evidence_ids||[]).join(', ')||'None recorded')}</small></details><div class="review-document-actions"><button class="button primary review-why" data-review-finding="${escapeHtml(finding.id)}">Ask why</button>${ref?`<button class="button ghost review-open" data-review-record="${escapeHtml(ref)}">Open record</button>`:''}</div></article>`}).join('');
+  return `<section class="review-queue" aria-labelledby="reviewQueueTitle"><div class="review-queue-heading"><div><span class="section-label">DOCUMENT REVIEW LIST</span><h4 id="reviewQueueTitle">Possible fraud? Check first.</h4></div><span>${findings.length} open item${findings.length===1?'':'s'}</span></div><p class="review-guardrail">These are warning patterns, not fraud findings. Duplicate paperwork, missing receipts, new vendors, changed payment details, and suspicious instructions can have innocent explanations. A person must check the original records.</p><div class="review-document-grid">${cards||'<p class="empty-state">No saved records are currently in the possible-fraud review list.</p>'}</div></section>`;
+}
+function explainReviewFinding(findingId){
+  const finding=(state.data.findings||[]).find(item=>String(item.id)===String(findingId));if(!finding)return;
+  state.selectedFinding=finding.id;state.selectedId=findingRecordRef(finding)||state.selectedId;
+  ask(`Why does ${finding.title} need review?`);
+}
+function bindRecordActions(){
+  $$('[data-record]').forEach(button=>button.onclick=()=>openRecord(button.dataset.record));
+  $$('[data-research-record]').forEach(button=>button.onclick=()=>openOutsideResearch(button.dataset.researchRecord));
+  $$('.review-open').forEach(button=>button.onclick=()=>openRecord(button.dataset.reviewRecord));
+  $$('.review-why').forEach(button=>button.onclick=()=>explainReviewFinding(button.dataset.reviewFinding));
+}
+function renderRecords(){
+  const webRecords=outsideResearchRecordsHtml(),reviewQueue=reviewQueueHtml();
+  if(state.workspace==='business'){
+    const rows=state.data.security.evidence.map(e=>`<tr><td><button data-record="security:${escapeHtml(e.id)}">${escapeHtml(e.id)}</button></td><td>${escapeHtml(e.type)}</td><td>${escapeHtml(e.title)}</td><td>${escapeHtml(e.source)}</td><td>${escapeHtml(e.as_of)}</td><td>${escapeHtml(e.statement)}</td></tr>`).join('');
+    $('#recordsView').innerHTML=`${reviewQueue}<section class="record-table-section"><h4>Saved assurance evidence</h4><table class="records-table"><thead><tr><th>Evidence</th><th>Type</th><th>Title</th><th>Source</th><th>As of</th><th>Observed statement</th></tr></thead><tbody>${rows}</tbody></table></section>${webRecords}`;
+    bindRecordActions();return;
+  }
+  const rows=state.data.transactions.slice(0,80).map(t=>`<tr><td><button data-record="transaction:${escapeHtml(t.id)}">${escapeHtml(t.id)}</button></td><td>${escapeHtml(t.merchant_raw)}</td><td>${escapeHtml(safeMoney(t.amount_cents,t.currency))}</td><td>${escapeHtml(t.occurred_on)}</td><td>${escapeHtml(t.office)}</td><td>${escapeHtml(t.source_id)}</td></tr>`).join('');
+  $('#recordsView').innerHTML=`${reviewQueue}<section class="record-table-section"><h4>Saved financial records</h4><table class="records-table"><thead><tr><th>Record</th><th>Merchant</th><th>Amount</th><th>Date</th><th>Office</th><th>Evidence</th></tr></thead><tbody>${rows}</tbody></table></section>${webRecords}`;
+  bindRecordActions();
+}
 
 async function openRecord(id){state.selectedId=id;try{const record=await api(`/api/records/${encodeURIComponent(id)}?workspace=${state.workspace}`);openDrawer('EVIDENCE RECORD',id,detailHtml(record));renderVisual()}catch(e){toast(e.message)}}
+function openOutsideResearch(ref){
+  const item=findOutsideResearch(ref);
+  if(!item){toast('That outside research lead is no longer available.');return}
+  const safeUrl=safeResearchUrl(item.url),title=String(item.title||'Outside research lead');
+  const link=safeUrl?`<a class="button ghost" href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer nofollow">Open original page ↗</a>`:'<p class="unsafe-link-note">The link was hidden because it was not a safe public web address.</p>';
+  openDrawer('UNVERIFIED OUTSIDE LEAD',title,`<div class="notice warning"><b>This is a lead, not proof.</b> It does not verify the company, payment details, or finding. The finding stays open until a person checks an authoritative source.</div><div class="research-record-copy"><p>${escapeHtml(outsideResearchExcerpt(item)||'No excerpt was returned.')}</p>${link}</div><div class="detail-grid"><div class="detail-row"><span>Search used</span><strong>${escapeHtml(item.query||'Not recorded')}</strong></div><div class="detail-row"><span>Found</span><strong>${escapeHtml(readableTime(item.retrieved_at))}</strong></div><div class="detail-row"><span>Source</span><strong>${escapeHtml(item.source_label||'Tavily · outside research')}</strong></div><div class="detail-row"><span>Handling</span><strong>Outside page text is untrusted</strong></div></div>`);
+}
 function detailHtml(obj){return `<div class="detail-grid">${Object.entries(obj).filter(([k])=>!k.includes('hash')).map(([k,v])=>`<div class="detail-row"><span>${escapeHtml(k.replaceAll('_',' '))}</span><strong>${escapeHtml(String(v??'Unknown'))}</strong></div>`).join('')}</div>`}
 function evidenceDrawer(){const f=state.data.findings.find(x=>x.id===state.selectedFinding);if(!f)return;openDrawer('SOURCE EVIDENCE',f.title,`<div class="notice">These are references to loaded synthetic records. PayProof preserves the source rather than rewriting it.</div>${f.evidence_ids.map(e=>`<article class="evidence-card"><b>${escapeHtml(e)}</b><p>Supporting evidence for ${escapeHtml(f.entity_id)}.</p></article>`).join('')}`)}
 function contextDrawer(){const c=state.lastContext||{workspace:state.workspace,selected_id:state.selectedId,evidence_ids:[],calculation:'Ask a question to populate this view.'};openDrawer('BOUNDED MODEL CONTEXT','Context used',`<div class="notice">Only the active scope, selected record, retrieved evidence, and deterministic calculation are provided to the assistant.</div>${detailHtml(c)}`)}
@@ -193,8 +446,27 @@ function reconciliationHtml(reconciliation){
 }
 function importedSourceHtml(source){
   const id=escapeHtml(source.id),kind=String(source.kind||'source');
-  const removalCopy=kind==='gmail'?'Remove imported Gmail evidence from this workspace. This does not disconnect Gmail.':'Remove this imported source and recalculate the workspace.';
+  const webResearch=kind==='web'||kind==='tavily'||String(source.id||'').startsWith('web:');
+  const removalCopy=kind==='gmail'?'Remove imported Gmail evidence from this workspace. This does not disconnect Gmail.':webResearch?'Remove this saved outside research from PayProof. This removes only the local research copy; it does not change Tavily or any web page.':'Remove this imported source and recalculate the workspace.';
   return `<article class="source-card compact"><div class="source-card-head"><b>${escapeHtml(source.label||source.id)}</b><span class="status-chip">${escapeHtml(kind)} · ${safeCount(source.record_count)} records</span></div><p>${removalCopy}</p><button class="button danger remove-source" data-source-id="${id}">Preview removal</button></article>`;
+}
+function outsideResearchSectionHtml(tavily,currentWorkspace){
+  const ready=tavily?.configured===true,items=outsideResearchItems();
+  const query=state.outsideResearchQueryByWorkspace[state.workspace]??outsideResearchDefaultQuery(currentWorkspace);
+  return `<section class="settings-section research-section" aria-labelledby="outsideResearchTitle">
+    <div class="settings-heading"><div><span class="section-label">OUTSIDE RESEARCH</span><h3 id="outsideResearchTitle">Public web leads</h3></div><span class="status-chip ${ready?'':'warn'}">${ready?'ready':'off'}</span></div>
+    <p>Search can point a reviewer toward public pages. Results are relevance-ranked, unverified leads—not proof of identity, registration, ownership, or payment details. Any related finding stays open.</p>
+    <div class="research-privacy"><b>Keep the search public.</b> Your search words are sent to Tavily. Use only public company or vendor terms, never account numbers, amounts, private email addresses, or other confidential details.</div>
+    ${ready?'':noticeHtml('Outside research is off because this server does not have a Tavily key. Add the key on the server to enable searching.','info')}
+    <form id="outsideResearchForm" class="research-form">
+      <label>What should I look for?<input id="outsideResearchQuery" name="query" maxlength="240" autocomplete="off" spellcheck="false" value="${escapeHtml(query)}" ${ready?'':'disabled'}></label>
+      <label>Number of leads<select id="outsideResearchMaxResults" name="max_results" ${ready?'':'disabled'}><option>3</option><option selected>5</option><option>10</option></select></label>
+      <button id="outsideResearchSearch" class="button primary" type="submit" ${ready?'':'disabled'}>Find public leads</button>
+    </form>
+    <div id="outsideResearchStatus" aria-live="polite"></div>
+    <div class="research-results-heading"><b>Saved for ${escapeHtml(currentWorkspace?.name||state.workspace)}</b><span>${items.length} unverified lead${items.length===1?'':'s'}</span></div>
+    <div class="research-results">${outsideResearchCardsHtml(items)}</div>
+  </section>`;
 }
 function intakeExpenseHtml(expense){
   return `<article class="intake-row"><div><b>${escapeHtml(expense.id)}</b><span>${escapeHtml(expense.merchant)} · ${escapeHtml(safeMoney(expense.amount_cents,expense.currency))}</span><small>${escapeHtml(expense.spent_on)} · ${escapeHtml(expense.receipt_status)} · ${escapeHtml(expense.approval_status)}</small></div><button class="button ghost edit-intake" data-expense-id="${escapeHtml(expense.id)}">Edit & history</button></article>`;
@@ -234,7 +506,7 @@ async function sourcesDrawer(message='',tone='success'){
   ]);
   if(workspace!==state.workspace||generation!==state.sourceGeneration)return;
   state.bankPreview=null;
-  const bank=s.bank||{},gmail=s.gmail||{},connections=Array.isArray(bank.connections)?bank.connections:[];
+  const bank=s.bank||{},gmail=s.gmail||{},tavily=s.tavily||{},connections=Array.isArray(bank.connections)?bank.connections:[];
   const allWorkspaces=Array.isArray(workspaceResult.workspaces)?workspaceResult.workspaces:[],workspaces=allWorkspaces.filter(item=>item.is_archived!==true),archivedWorkspaces=allWorkspaces.filter(item=>item.is_archived===true),currentWorkspace=workspaces.find(item=>item.id===workspace)||{id:workspace,name:workspace,kind:'company',is_demo:false};
   const folders=Array.isArray(folderResult.folders)?folderResult.folders:[],enabledFolders=folders.filter(folder=>folder.enabled===true);
   state.sourceConfig={...s,workspaces,archivedWorkspaces,intakeFolders:folders,currentWorkspace};
@@ -278,6 +550,7 @@ async function sourcesDrawer(message='',tone='success'){
       <label>Maximum messages<select id="gmailMaxResults" ${gmail.connected?'':'disabled'}><option>10</option><option selected>20</option><option>50</option></select></label>
       <div class="modal-actions"><button id="gmailConnect" class="button ${gmail.connected?'ghost':'primary'}" ${gmailReady?'':'disabled'}>${gmail.connected?'Reconnect Gmail':'Connect Gmail'}</button><button id="gmailImport" class="button primary" ${gmail.connected?'':'disabled'}>Import matching email</button>${gmail.connected?'<button id="gmailDisconnect" class="button danger">Preview disconnect</button>':''}</div>
     </section>
+    ${outsideResearchSectionHtml(tavily,currentWorkspace)}
     <section class="settings-section" aria-labelledby="intakeSettingsTitle">
       <div class="settings-heading"><div><span class="section-label">LOCAL INTAKE</span><h3 id="intakeSettingsTitle">Expense intake</h3></div><span class="status-chip ${enabledFolders.length?'good':'warn'}">${enabledFolders.length} enabled</span></div>
       <p>Assign existing folders on this PayProof computer to <b>${escapeHtml(currentWorkspace.name)}</b>. Each scan imports only that company’s JSON paperwork. Folder removal preserves source files, imported records, and edit history.</p>
@@ -316,6 +589,9 @@ function bindSourceActions(){
   const gmailConnect=$('#gmailConnect');if(gmailConnect&&!gmailConnect.disabled)gmailConnect.onclick=openGmailConnect;
   const gmailImport=$('#gmailImport');if(gmailImport&&!gmailImport.disabled)gmailImport.onclick=importGmailEvidence;
   const gmailDisconnect=$('#gmailDisconnect');if(gmailDisconnect)gmailDisconnect.onclick=previewGmailDisconnect;
+  const outsideResearchForm=$('#outsideResearchForm'),outsideResearchQuery=$('#outsideResearchQuery');
+  if(outsideResearchQuery)outsideResearchQuery.oninput=()=>{state.outsideResearchQueryByWorkspace[state.workspace]=outsideResearchQuery.value};
+  if(outsideResearchForm&&!$('#outsideResearchSearch')?.disabled)outsideResearchForm.onsubmit=searchOutsideResearch;
   const scanAllIntake=$('#scanAllIntake');if(scanAllIntake&&!scanAllIntake.disabled)scanAllIntake.onclick=()=>scanIntakeFolder();
   const addIntakeFolderForm=$('#addIntakeFolderForm');if(addIntakeFolderForm)addIntakeFolderForm.onsubmit=addIntakeFolder;
   $$('.scan-folder').forEach(button=>button.onclick=()=>scanIntakeFolder(button.dataset.folderId));
@@ -324,6 +600,35 @@ function bindSourceActions(){
   $$('.remove-folder').forEach(button=>button.onclick=()=>previewIntakeFolderRemoval(button.dataset.folderId));
   $$('.edit-intake').forEach(button=>button.onclick=()=>openIntakeEditor(button.dataset.expenseId));
   $$('.remove-source').forEach(button=>button.onclick=()=>previewImportedSourceRemoval(button.dataset.sourceId));
+}
+async function searchOutsideResearch(event){
+  event.preventDefault();
+  const workspace=state.workspace,form=event.currentTarget,button=$('#outsideResearchSearch'),status=$('#outsideResearchStatus');
+  const data=new FormData(form),query=String(data.get('query')||'').trim(),maxResults=Math.max(1,Math.min(10,Number.parseInt(data.get('max_results'),10)||5));
+  state.outsideResearchQueryByWorkspace[workspace]=query;
+  if(query.length<3){if(status)status.innerHTML=noticeHtml('Use at least three characters so the search has a clear public subject.','warning');return}
+  if(button){button.disabled=true;button.textContent='Looking for public leads…'}
+  if(status)status.innerHTML=noticeHtml('Searching the public web. No finding will be closed by these results.','info');
+  let result;
+  try{
+    result=await api('/api/sources/tavily/search',jsonRequest('POST',{workspace,query,max_results:maxResults}));
+  }catch(error){
+    if(workspace===state.workspace&&status)status.innerHTML=apiErrorHtml(error);
+    if(button){button.disabled=false;button.textContent='Find public leads'}
+    return;
+  }
+  if(workspace!==state.workspace){toast(`Outside research was saved to ${workspace}.`);return}
+  const returned=Array.isArray(result.results)?result.results:Array.isArray(result.web_evidence)?result.web_evidence:[];
+  if(returned.length)state.outsideResearchResultsByWorkspace[workspace]=returned;
+  const reportedCount=safeCount(result.added||result.accepted||result.saved_count),count=reportedCount||returned.length;
+  const countText=count?`${count} unverified lead${count===1?' was':'s were'} saved.`:'The search finished with no new leads.';
+  try{
+    await loadData();
+    await sourcesDrawer(`${countText} Nothing was verified, and the finding is still open.`,count?'success':'info');
+  }catch(error){
+    if(status)status.innerHTML=`${noticeHtml(`${countText} The page could not refresh yet, but no finding was closed.`,'warning')}${apiErrorHtml(error)}`;
+    if(button){button.disabled=false;button.textContent='Find public leads'}
+  }
 }
 function cancelActivePlaid(){
   const handler=state.activePlaidHandler;
@@ -361,7 +666,7 @@ async function switchWorkspace(workspaceId,label=workspaceId,reopenSources=false
   if(reopenSources)openDrawer('CONNECTIONS & AUDIT','Switching company',noticeHtml(`Loading ${companyLabel} without carrying over the previous company context...`,'info'));
   else closeDrawer();
   try{
-    const loaded=await loadData();
+    const loaded=await loadData('Switching company…');
     if(!loaded||state.workspace!==nextWorkspace||transition!==state.workspaceGeneration)return false;
   }catch(error){
     if(state.workspace!==nextWorkspace||transition!==state.workspaceGeneration)return false;
@@ -763,13 +1068,14 @@ async function scanIntakeFolder(folderId=null){
   }catch(error){if(state.workspace===workspace)setSourceAction(apiErrorHtml(error));else toast(`Intake scan failed for ${workspace}: ${error.message}`)}
 }
 async function previewImportedSourceRemoval(sourceId){
-  const workspace=state.workspace;
+  const workspace=state.workspace,webResearch=String(sourceId||'').startsWith('web:');
   setSourceAction(noticeHtml('Calculating which local records would be removed…','info'));
   try{
     const params=new URLSearchParams({workspace});
     const preview=await api(`/api/sources/${encodeURIComponent(sourceId)}/removal-preview?${params}`);
     if(state.workspace!==workspace)return;
-    setSourceAction(`<div class="confirmation-card"><span class="section-label">SOURCE REMOVAL PREVIEW</span><h3>${escapeHtml(preview.filename||preview.source_id)}</h3>${affectedHtml(preview.affected)}<div class="notice warning">Only these local PayProof records will be removed. Provider data and connection permissions are unchanged.</div><div class="modal-actions"><button id="confirmSourceRemoval" class="button danger">Confirm removal</button><button id="cancelSourceAction" class="button ghost">Cancel</button></div></div>`);
+    const removalNotice=webResearch?'Only this saved local research will be removed. Nothing is deleted from Tavily or the public web, and the finding stays open.':'Only these local PayProof records will be removed. Provider data and connection permissions are unchanged.';
+    setSourceAction(`<div class="confirmation-card"><span class="section-label">SOURCE REMOVAL PREVIEW</span><h3>${escapeHtml(preview.filename||preview.source_id)}</h3>${affectedHtml(preview.affected)}<div class="notice warning">${removalNotice}</div><div class="modal-actions"><button id="confirmSourceRemoval" class="button danger">Confirm removal</button><button id="cancelSourceAction" class="button ghost">Cancel</button></div></div>`);
     $('#cancelSourceAction').onclick=()=>setSourceAction('');
     $('#confirmSourceRemoval').onclick=async event=>{
       event.currentTarget.disabled=true;
@@ -777,7 +1083,8 @@ async function previewImportedSourceRemoval(sourceId){
         const params=new URLSearchParams({workspace,preview_id:preview.preview_id,confirm:'true'});
         const result=await api(`/api/sources/${encodeURIComponent(sourceId)}?${params}`,{method:'DELETE'});
         if(state.workspace!==workspace){toast(`Source removed from ${workspace}.`);return}
-        await loadData();await sourcesDrawer(`Removed ${safeCount(result.removed)} local record(s). Upstream provider data was not changed.`,'success');
+        if(webResearch)state.outsideResearchResultsByWorkspace[workspace]=[];
+        await loadData();await sourcesDrawer(webResearch?`Removed ${safeCount(result.removed)} saved research lead(s) from PayProof only. Tavily, public pages, and the finding were unchanged.`:`Removed ${safeCount(result.removed)} local record(s). Upstream provider data was not changed.`,'success');
       }catch(error){setSourceAction(apiErrorHtml(error))}
     };
   }catch(error){setSourceAction(apiErrorHtml(error))}
@@ -917,11 +1224,20 @@ function toggleSpokenReplies(){
   if(!state.voice.spokenReplies)window.speechSynthesis.cancel();
   renderVoiceControls(state.voice.spokenReplies?`Spoken replies enabled with browser voice ${state.voice.replyVoice.name}.`:'Spoken replies are off. Replies remain text-only.');
 }
+function spokenReplyText(text,maxLength=680){
+  let spoken=String(text||'').replace(/\[(?:[A-Z][A-Z0-9_]*-)[A-Z0-9_.:-]+\]/gi,' ').replace(/\s+([,.;:!?])/g,'$1').replace(/\s+/g,' ').trim();
+  if(spoken.length<=maxLength)return spoken;
+  const clipped=spoken.slice(0,maxLength+1),sentences=[...clipped.matchAll(/[.!?](?=\s|$)/g)],lastSentence=sentences.at(-1)?.index;
+  if(Number.isInteger(lastSentence)&&lastSentence>=Math.floor(maxLength*.45))return clipped.slice(0,lastSentence+1).trim();
+  const lastSpace=clipped.lastIndexOf(' ',maxLength-1);
+  return `${clipped.slice(0,lastSpace>Math.floor(maxLength*.45)?lastSpace:maxLength-1).trim()}…`;
+}
 function speakAssistantReply(text){
   const voice=state.voice.replyVoice;
   if(!state.voice.spokenReplies||!isEligibleBrowserReplyVoice(voice)||!window.speechSynthesis||typeof window.SpeechSynthesisUtterance!=='function')return;
+  const spoken=spokenReplyText(text);if(!spoken)return;
   window.speechSynthesis.cancel();
-  const utterance=new window.SpeechSynthesisUtterance(String(text||'').slice(0,2000));utterance.voice=voice;utterance.lang=voice.lang||navigator.language||'en-US';utterance.rate=1;
+  const utterance=new window.SpeechSynthesisUtterance(spoken);utterance.voice=voice;utterance.lang=voice.lang||navigator.language||'en-US';utterance.rate=.98;
   utterance.onstart=()=>renderVoiceControls(`Speaking with browser voice ${voice.name}.`);
   utterance.onend=()=>renderVoiceControls(null);
   utterance.onerror=()=>renderVoiceControls('The browser could not play this reply. Spoken replies remain enabled for the next answer.');
@@ -975,14 +1291,16 @@ function syncNav(){$$('#viewNav button').forEach(b=>b.classList.toggle('active',
 
 $('#workspaceSelect').onchange=event=>switchWorkspace(event.target.value,event.target.selectedOptions[0]?.textContent||event.target.value);
 $$('#viewNav button').forEach(b=>b.onclick=()=>{state.view=b.dataset.view;syncNav();renderVisual()});
-$('#refreshButton').onclick=loadData;$('#resetButton').onclick=async()=>{if(confirm('Reset only the built-in synthetic example?')){await api('/api/reset',{method:'POST'});state.selectedFinding='F-ROUTE-001';state.selectedId='invoice:INV-1007';await loadData();toast('Synthetic example reset')}};
+$('#refreshButton').onclick=()=>loadData();$('#resetButton').onclick=async()=>{if(confirm('Reset only the built-in synthetic example?')){await api('/api/reset',{method:'POST'});state.selectedFinding='F-ROUTE-001';state.selectedId='invoice:INV-1007';await loadData();toast('Synthetic example reset')}};
 $('#importOpen').onclick=importDrawer;$('#sourcesOpen').onclick=()=>sourcesDrawer().catch(e=>toast(e.message));$('#tourButton').onclick=startDemo;$('#evidenceButton').onclick=evidenceDrawer;$('#contextOpen').onclick=contextDrawer;$('#chatContextButton').onclick=contextDrawer;
 $('#drawerClose').onclick=closeDrawer;$('#drawerBackdrop').onclick=closeDrawer;$('#chatSend').onclick=()=>ask();$('#chatInput').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();ask()}};
 $$('#suggestions button').forEach(b=>b.onclick=()=>ask(b.textContent));$$('[data-action]').forEach(b=>b.onclick=()=>takeAction(b.dataset.action));
 $('#zoomIn').onclick=()=>{state.zoom=Math.min(2,state.zoom+.15);drawAtlas()};$('#zoomOut').onclick=()=>{state.zoom=Math.max(.65,state.zoom-.15);drawAtlas()};$('#zoomReset').onclick=()=>{state.zoom=1;state.pan={x:0,y:0};drawAtlas()};
-$('#atlasCanvas').onclick=e=>{const box=e.currentTarget.getBoundingClientRect(),x=(e.clientX-box.left-state.pan.x)/state.zoom,y=(e.clientY-box.top-state.pan.y)/state.zoom;let hit=null,best=999;state.nodes.forEach(n=>{const d=Math.hypot(n.x-x,n.y-y);if(d<Math.max(18,n.size+8)&&d<best){hit=n;best=d}});if(hit){state.selectedId=hit.id;$('#selectionCard').style.display='block';$('#selectionCard').innerHTML=`<b>${escapeHtml(hit.label)}</b><small>${hit.type.toUpperCase()} · ${escapeHtml(hit.source||'loaded evidence')} · click details or ask a question</small>`;if(['vendor','invoice','transaction','receipt','email'].includes(hit.type))openRecord(hit.id);drawAtlas()}};
+$('#atlasCanvas').onclick=e=>{const box=e.currentTarget.getBoundingClientRect(),x=(e.clientX-box.left-state.pan.x)/state.zoom,y=(e.clientY-box.top-state.pan.y)/state.zoom;let hit=null,best=999;state.nodes.forEach(n=>{const d=Math.hypot(n.x-x,n.y-y);if(d<Math.max(18,n.size+8)&&d<best){hit=n;best=d}});if(hit){state.selectedId=hit.id;$('#selectionCard').style.display='block';$('#selectionCard').innerHTML=`<b>${escapeHtml(hit.label)}</b><small>${escapeHtml(String(hit.type||'record').replaceAll('_',' '))} · ${escapeHtml(hit.source||'saved evidence')} · choose the node for details</small>`;if(hit.type==='web')openOutsideResearch(hit.id);else if(hit.type==='employee')openPersonDetails(String(hit.id).replace(/^employee:/,''));else if(['vendor','invoice','transaction','receipt','email','expense','bank_transaction'].includes(hit.type)||String(hit.id).startsWith('security:'))openRecord(hit.id);drawAtlas()}};
 let rotateStart=null;$('#atlasCanvas').onpointerdown=e=>{rotateStart={x:e.clientX,yaw:state.yaw};e.currentTarget.setPointerCapture(e.pointerId)};$('#atlasCanvas').onpointermove=e=>{if(!rotateStart)return;state.yaw=rotateStart.yaw+(e.clientX-rotateStart.x)/240;drawAtlas()};$('#atlasCanvas').onpointerup=()=>{rotateStart=null};
 window.addEventListener('resize',()=>state.view==='atlas'&&drawAtlas());
 setupVoiceControls();
+setupAutoRefresh();
+setupConnectivity();
 addMessage('assistant','I am ready. Ask me to complete the security questionnaire, investigate a control, explain conflicting evidence, identify what is unknown, or show the source behind any answer.');
 loadData().catch(e=>addMessage('assistant',`The application could not load: ${e.message}`));
