@@ -836,8 +836,10 @@ def import_transactions_csv(workspace_id: str, filename: str, content: str, comm
     return {"accepted": accepted, "rejected": rejected, "errors": [], "committed": bool(commit and accepted and not rejected)}
 
 
-def import_gmail_metadata(messages: list[dict[str, Any]], workspace_id: str = "personal") -> dict[str, int]:
-    """Store minimal Gmail metadata and snippets locally; never stores attachments or full bodies."""
+def import_gmail_metadata(messages: list[dict[str, Any]], workspace_id: str = "personal",
+                           provider: str = "gmail", source_label: str = "Gmail · read-only metadata",
+                           id_prefix: str = "GMAIL") -> dict[str, int]:
+    """Store minimal message metadata and snippets locally; never stores attachments or full bodies."""
     accepted = skipped = 0
     initialize_database()
     with closing(_connect()) as conn:
@@ -851,10 +853,10 @@ def import_gmail_metadata(messages: list[dict[str, Any]], workspace_id: str = "p
             received_at = str(message.get("received_at", ""))[:100]
             snippet = re.sub(r"\s+", " ", str(message.get("snippet", ""))).strip()[:800]
             content_hash = hashlib.sha256(f"{message_id}|{sender}|{subject}|{received_at}|{snippet}".encode("utf-8")).hexdigest()
-            row_id = f"GMAIL-{message_id}"
+            row_id = f"{id_prefix}-{message_id}"
             result = conn.execute(
                 "INSERT OR IGNORE INTO email_evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (row_id, workspace_id, "gmail", sender, subject, received_at, snippet, "Gmail · read-only metadata", 0, content_hash, utc_now()),
+                (row_id, workspace_id, provider, sender, subject, received_at, snippet, source_label, 0, content_hash, utc_now()),
             )
             accepted += result.rowcount
             skipped += 1 - result.rowcount
@@ -862,25 +864,45 @@ def import_gmail_metadata(messages: list[dict[str, Any]], workspace_id: str = "p
     return {"accepted": accepted, "skipped": skipped}
 
 
+def import_web_evidence(items: list[dict[str, Any]], workspace_id: str = "personal") -> dict[str, int]:
+    """Store fetched web page evidence through the email_evidence pipeline (URL->sender, title->subject, content->snippet)."""
+    messages = [
+        {
+            "id": hashlib.sha256(str(item.get("url", "")).encode("utf-8")).hexdigest()[:16],
+            "sender": str(item.get("url", "Unknown source")),
+            "subject": str(item.get("title", "(untitled)")),
+            "received_at": str(item.get("fetched_at", "")),
+            "snippet": str(item.get("content", "")),
+        }
+        for item in items
+    ]
+    return import_gmail_metadata(messages, workspace_id, provider="web", source_label="Web · fetched evidence", id_prefix="WEB")
+
+
 def list_import_sources(workspace_id: str) -> list[dict[str, Any]]:
     initialize_database()
     with closing(_connect()) as conn:
         imports = _rows(conn, "SELECT id, filename, accepted, rejected, created_at FROM imports WHERE workspace_id=? ORDER BY created_at DESC", (workspace_id,))
-        gmail_count = conn.execute("SELECT COUNT(*) FROM email_evidence WHERE workspace_id=? AND provider='gmail'", (workspace_id,)).fetchone()[0]
+        providers = _rows(
+            conn,
+            "SELECT provider, COUNT(*) AS record_count, MAX(source_label) AS source_label FROM email_evidence WHERE workspace_id=? GROUP BY provider",
+            (workspace_id,),
+        )
     sources = [{**item, "kind": "image" if Path(item["filename"]).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"} else "csv",
                 "label": item["filename"], "record_count": item["accepted"]} for item in imports]
-    if gmail_count:
-        sources.insert(0, {"id": "gmail", "kind": "gmail", "label": "Gmail · read-only metadata", "record_count": gmail_count})
+    for row in providers:
+        sources.insert(0, {"id": row["provider"], "kind": row["provider"], "label": row["source_label"], "record_count": row["record_count"]})
     return sources
 
 
 def remove_source(workspace_id: str, source_id: str) -> dict[str, Any]:
     initialize_database()
     with closing(_connect()) as conn:
-        if source_id == "gmail":
-            count = conn.execute("DELETE FROM email_evidence WHERE workspace_id=? AND provider='gmail'", (workspace_id,)).rowcount
+        provider_count = conn.execute("SELECT COUNT(*) FROM email_evidence WHERE workspace_id=? AND provider=?", (workspace_id, source_id)).fetchone()[0]
+        if provider_count:
+            count = conn.execute("DELETE FROM email_evidence WHERE workspace_id=? AND provider=?", (workspace_id, source_id)).rowcount
             conn.commit()
-            return {"removed": count, "kind": "gmail"}
+            return {"removed": count, "kind": source_id}
         imported = conn.execute("SELECT * FROM imports WHERE id=? AND workspace_id=?", (source_id, workspace_id)).fetchone()
         if not imported:
             raise ValueError("Imported source not found")

@@ -21,6 +21,7 @@ from src.core import (
     get_record,
     import_transactions_csv,
     import_gmail_metadata,
+    import_web_evidence,
     import_ocr_receipt,
     generate_security_questionnaire,
     initialize_database,
@@ -227,6 +228,16 @@ def gmail_import():
         return jsonify({**result, "query": query, "requested": max_results})
     except Exception as exc:
         return jsonify({"error": f"Gmail import failed: {type(exc).__name__}: {exc}"}), 400
+
+
+@app.post("/api/sources/web/import")
+def web_import():
+    payload = request.get_json(silent=True) or {}
+    items = payload.get("items") or []
+    if not isinstance(items, list) or not items:
+        return jsonify({"error": "Provide at least one item with a url"}), 400
+    result = import_web_evidence(items, str(payload.get("workspace") or "personal"))
+    return jsonify(result)
 
 
 @app.delete("/api/sources/<source_id>")
