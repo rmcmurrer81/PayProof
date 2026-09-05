@@ -1,0 +1,15 @@
+{
+  "id": "EXP-2026-042",
+  "document_type": "employee_expense_report",
+  "employee": "Jordan Alvarez",
+  "department": "Operations",
+  "office": "Austin",
+  "merchant": "Staples Store 1842",
+  "amount": "247.83",
+  "currency": "USD",
+  "date": "2026-08-25",
+  "category": "Office supplies",
+  "purpose": "New-hire desk setup",
+  "receipt_status": "matched",
+  "approval_status": "approved"
+}

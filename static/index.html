@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#020813">
+  <title>PayProof Atlas</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
+  <div id="app" class="app-shell">
+    <header class="topbar glass">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true"><span>P</span></div>
+        <div><h1>PayProof <em>Atlas</em></h1><p>Detect what changed before money moves.</p></div>
+      </div>
+      <div class="top-status">
+        <label class="workspace-picker"><span>WORKSPACE</span><select id="workspaceSelect" aria-label="Workspace"></select></label>
+        <span class="pill cyan">SYNTHETIC EXAMPLE</span>
+        <span id="prismPill" class="pill muted"><i></i> PRISM CHECKING</span>
+        <button id="importOpen" class="button ghost">＋ Import</button>
+        <button id="sourcesOpen" class="button ghost">⌁ Sources</button>
+        <button id="tourButton" class="button primary">▶ Guided demo</button>
+      </div>
+    </header>
+
+    <aside class="rail glass">
+      <div class="section-label">VISUAL MODE</div>
+      <nav id="viewNav" class="view-nav" aria-label="Visual mode">
+        <button class="active" data-view="atlas"><span>◉</span><b>Atlas</b><small>Relationships</small></button>
+        <button data-view="change"><span>↗</span><b>Change</b><small>Period analysis</small></button>
+        <button data-view="geo"><span>⌖</span><b>Locations</b><small>Office map</small></button>
+        <button data-view="records"><span>▦</span><b>Records</b><small>Evidence table</small></button>
+      </nav>
+      <div class="rail-divider"></div>
+      <div class="section-label">OPEN FINDINGS</div>
+      <div id="findingRail" class="finding-rail"></div>
+      <div class="rail-spacer"></div>
+      <button id="resetButton" class="button ghost full">↻ Reset example</button>
+      <div class="safety-note"><span>✓</span><div><b>Human controlled</b><small>No payment can move</small></div></div>
+    </aside>
+
+    <main class="command-center">
+      <section class="hero-line">
+        <div><div class="eyebrow">LIVE FINANCIAL CONTEXT</div><h2 id="viewTitle">Money relationship atlas</h2></div>
+        <div class="hero-actions"><span id="updatedAt">Loading…</span><button id="refreshButton" class="icon-button" title="Refresh">↻</button></div>
+      </section>
+
+      <section id="metrics" class="metrics"></section>
+
+      <section class="visual-panel glass">
+        <div class="panel-head">
+          <div><span class="section-label">INTERACTIVE MODEL</span><h3 id="panelTitle">Financial relationships</h3></div>
+          <div class="legend"><span><i class="dot clear"></i>Verified</span><span><i class="dot review"></i>Review</span><span><i class="dot high"></i>Changed</span></div>
+        </div>
+        <div id="visualStage" class="visual-stage">
+          <canvas id="atlasCanvas" aria-label="Interactive financial relationship map"></canvas>
+          <div id="changeView" class="change-view hidden"></div>
+          <div id="geoView" class="geo-view hidden"></div>
+          <div id="recordsView" class="records-view hidden"></div>
+          <div class="canvas-tools"><button id="zoomOut" title="Zoom out">−</button><button id="zoomReset" title="Reset view">◎</button><button id="zoomIn" title="Zoom in">＋</button></div>
+          <div id="selectionCard" class="selection-card"></div>
+        </div>
+        <div class="visual-foot"><span id="visualHint">Click any node to inspect its evidence and ask follow-up questions.</span><button id="contextOpen" class="link-button">Context used ↗</button></div>
+      </section>
+
+      <section id="focusPanel" class="focus-panel glass">
+        <div class="focus-copy"><span class="section-label">SELECTED FINDING</span><h3 id="focusTitle">Loading evidence…</h3><p id="focusSummary"></p></div>
+        <div id="comparison" class="comparison"></div>
+        <div class="focus-actions"><button data-action="hold" class="button danger">Hold</button><button data-action="manual_review" class="button amber">Review</button><button id="evidenceButton" class="button ghost">Evidence</button></div>
+      </section>
+    </main>
+
+    <aside class="assistant glass">
+      <div class="assistant-head">
+        <div><span class="section-label">EVIDENCE-GROUNDED ASSISTANT</span><h2>Ask PayProof</h2></div>
+        <div class="assistant-orb"><i></i></div>
+      </div>
+      <div class="assistant-badges"><span>BOUNDED CONTEXT</span><span>DETERMINISTIC MATH</span></div>
+      <div id="suggestions" class="suggestions">
+        <button>What changed?</button><button>Compare office spending</button><button>Find duplicates</button><button>What data do you have?</button>
+      </div>
+      <div id="chatLog" class="chat-log" aria-live="polite"></div>
+      <div class="chat-compose">
+        <textarea id="chatInput" rows="2" placeholder="Ask about this view, a vendor, a total, or a change…"></textarea>
+        <button id="chatSend" class="send-button" aria-label="Send question">↑</button>
+      </div>
+      <div class="assistant-foot"><button id="chatContextButton" class="link-button">Inspect answer context</button><span id="traceStatus">Trace: waiting</span></div>
+    </aside>
+  </div>
+
+  <div id="drawerBackdrop" class="backdrop hidden"></div>
+  <section id="drawer" class="drawer hidden" aria-modal="true" role="dialog">
+    <header><div><span id="drawerLabel" class="section-label">DETAILS</span><h2 id="drawerTitle">Details</h2></div><button id="drawerClose" class="icon-button">×</button></header>
+    <div id="drawerContent" class="drawer-content"></div>
+  </section>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

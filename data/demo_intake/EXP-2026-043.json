@@ -1,0 +1,15 @@
+{
+  "id": "EXP-2026-043",
+  "document_type": "employee_expense_report",
+  "employee": "Priya Shah",
+  "department": "Customer Success",
+  "office": "Chicago",
+  "merchant": "Lakeside Bistro",
+  "amount": "186.45",
+  "currency": "USD",
+  "date": "2026-08-27",
+  "category": "Meals",
+  "purpose": "Customer renewal dinner",
+  "receipt_status": "missing",
+  "approval_status": "needs_review"
+}

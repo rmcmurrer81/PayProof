@@ -1,0 +1,15 @@
+{
+  "id": "EXP-2026-041",
+  "document_type": "employee_expense_report",
+  "employee": "Maya Chen",
+  "department": "Sales",
+  "office": "New York",
+  "merchant": "Delta Air Lines",
+  "amount": "684.20",
+  "currency": "USD",
+  "date": "2026-08-21",
+  "category": "Travel",
+  "purpose": "Client kickoff meeting",
+  "receipt_status": "matched",
+  "approval_status": "approved"
+}

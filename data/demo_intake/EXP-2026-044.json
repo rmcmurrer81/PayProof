@@ -1,0 +1,15 @@
+{
+  "id": "EXP-2026-044",
+  "document_type": "mileage_reimbursement",
+  "employee": "Jordan Alvarez",
+  "department": "Operations",
+  "office": "Austin",
+  "merchant": "Mileage reimbursement",
+  "amount": "92.46",
+  "currency": "USD",
+  "date": "2026-08-29",
+  "category": "Mileage",
+  "purpose": "Warehouse inspection, 138 miles at documented rate",
+  "receipt_status": "not_required",
+  "approval_status": "submitted"
+}
