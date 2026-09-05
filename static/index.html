@@ -28,22 +28,22 @@
     <aside class="rail glass">
       <div class="section-label">VISUAL MODE</div>
       <nav id="viewNav" class="view-nav" aria-label="Visual mode">
-        <button class="active" data-view="atlas"><span>◉</span><b>Atlas</b><small>Relationships</small></button>
-        <button data-view="change"><span>↗</span><b>Change</b><small>Period analysis</small></button>
-        <button data-view="geo"><span>⌖</span><b>Locations</b><small>Office map</small></button>
-        <button data-view="records"><span>▦</span><b>Records</b><small>Evidence table</small></button>
+        <button class="active" data-view="atlas"><span>◉</span><b>Atlas</b><small>3D evidence graph</small></button>
+        <button data-view="change"><span>↗</span><b>Readiness</b><small>Control analysis</small></button>
+        <button data-view="geo"><span>⌖</span><b>Coverage</b><small>Sources & owners</small></button>
+        <button data-view="records"><span>▦</span><b>Evidence</b><small>Source records</small></button>
       </nav>
       <div class="rail-divider"></div>
       <div class="section-label">PRIORITY CONTROLS</div>
       <div id="findingRail" class="finding-rail"></div>
       <div class="rail-spacer"></div>
       <button id="resetButton" class="button ghost full">↻ Reset example</button>
-      <div class="safety-note"><span>✓</span><div><b>Human controlled</b><small>No payment can move</small></div></div>
+      <div class="safety-note"><span>✓</span><div><b>Evidence controlled</b><small>No unsupported claim</small></div></div>
     </aside>
 
     <main class="command-center">
       <section class="hero-line">
-        <div><div class="eyebrow">LIVE FINANCIAL CONTEXT</div><h2 id="viewTitle">Money relationship atlas</h2></div>
+        <div><div class="eyebrow">LIVE TRUST &amp; RISK CONTEXT</div><h2 id="viewTitle">Security assurance atlas</h2></div>
         <div class="hero-actions"><span id="updatedAt">Loading…</span><button id="refreshButton" class="icon-button" title="Refresh">↻</button></div>
       </section>
 
@@ -66,7 +66,7 @@
       </section>
 
       <section id="focusPanel" class="focus-panel glass">
-        <div class="focus-copy"><span class="section-label">SELECTED FINDING</span><h3 id="focusTitle">Loading evidence…</h3><p id="focusSummary"></p></div>
+        <div class="focus-copy"><span class="section-label">SELECTED CONTROL</span><h3 id="focusTitle">Loading evidence…</h3><p id="focusSummary"></p></div>
         <div id="comparison" class="comparison"></div>
         <div class="focus-actions"><button data-action="hold" class="button danger">Hold</button><button data-action="manual_review" class="button amber">Review</button><button id="evidenceButton" class="button ghost">Evidence</button></div>
       </section>

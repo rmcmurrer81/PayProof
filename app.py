@@ -11,7 +11,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 from src.core import (
     PROJECT_ROOT,
@@ -22,10 +22,13 @@ from src.core import (
     import_transactions_csv,
     import_gmail_metadata,
     import_ocr_receipt,
+    generate_security_questionnaire,
     initialize_database,
     list_import_sources,
+    list_chat_history,
     prism_status,
     record_action,
+    record_chat_turn,
     remove_source,
     scan_intake_folder,
     send_prism_trace,
@@ -86,9 +89,20 @@ def chat():
     result, model_status = explain_with_runtime_model(question, result)
     latency = round((time.perf_counter() - started) * 1000)
     trace = send_prism_trace(question, result, session_id, latency, workspace)
+    record_chat_turn(session_id, workspace, question, result)
     return jsonify({"answer": result.answer, "evidence_ids": result.evidence_ids, "focus_ids": result.focus_ids, "model": model_status,
                     "calculation": result.calculation, "context": {"workspace": workspace, "selected_id": selected_id,
                     "evidence_ids": result.evidence_ids, "calculation": result.calculation}, "trace": trace})
+
+
+@app.get("/api/chat/history")
+def chat_history():
+    return jsonify(list_chat_history(str(request.args.get("session_id") or "payproof-session"), request.args.get("workspace", "business")))
+
+
+@app.get("/api/security/questionnaire")
+def security_questionnaire():
+    return jsonify(generate_security_questionnaire())
 
 
 @app.post("/api/actions")

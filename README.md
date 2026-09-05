@@ -16,6 +16,12 @@ PayProof targets the **Trust & Risk** track: safer financial decisions through e
 
 The primary example is fictional. It shows a $48,750 invoice proposing destination `****9142` where the previously verified destination was `****7284`. PayProof describes this as an anomaly requiring verification, not proof of fraud.
 
+## Regodit Trust & Risk challenge
+
+The default Meridian Works workspace is an AI Security Analyst completing a seven-question security questionnaire from intentionally incomplete and conflicting evidence. Ask about MFA, customer-data storage, encryption at rest, backups, vulnerability scans, production access, offboarding, or an unsupported certification claim. Every supported answer includes evidence IDs, confidence, detected gaps, and a next investigation step. Unsupported claims remain **Unknown**.
+
+The questionnaire is available as structured JSON at `/api/security/questionnaire`, prioritized with operating gaps first. Synthetic source documents are in `data/security_evidence`.
+
 ## Windows setup
 
 The easiest path is `Setup PayProof.cmd`. Manual PowerShell setup:

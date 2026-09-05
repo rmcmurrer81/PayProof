@@ -1,0 +1,7 @@
+SYNTHETIC BACKUP JOB HISTORY
+
+2026-09-02 02:00Z  SUCCESS  encrypted database backup
+2026-09-03 02:00Z  FAILED   expired storage credential
+2026-09-04 02:00Z  FAILED   expired storage credential
+
+Expected schedule: daily

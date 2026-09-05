@@ -140,6 +140,11 @@ CREATE TABLE IF NOT EXISTS intake_documents (
     status TEXT NOT NULL, is_synthetic INTEGER NOT NULL, content_hash TEXT NOT NULL,
     imported_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS chat_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL,
+    evidence_ids TEXT NOT NULL, created_at TEXT NOT NULL
+);
 """
 
 
@@ -333,6 +338,33 @@ def scan_intake_folder() -> dict[str, Any]:
     USER_INTAKE_DIR.mkdir(parents=True, exist_ok=True)
     with closing(_connect()) as connection:
         return _scan_intake_directories(connection)
+
+
+def record_chat_turn(session_id: str, workspace_id: str, question: str, result: "ChatResult") -> None:
+    with closing(_connect()) as connection:
+        connection.executemany(
+            "INSERT INTO chat_history(session_id, workspace_id, role, content, evidence_ids, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            [(session_id, workspace_id, "user", question, "[]", utc_now()),
+             (session_id, workspace_id, "assistant", result.answer, json.dumps(result.evidence_ids), utc_now())],
+        )
+        connection.commit()
+
+
+def list_chat_history(session_id: str, workspace_id: str, limit: int = 30) -> list[dict[str, Any]]:
+    initialize_database()
+    with closing(_connect()) as connection:
+        rows = _rows(connection, "SELECT role, content, evidence_ids, created_at FROM chat_history WHERE session_id=? AND workspace_id=? ORDER BY id DESC LIMIT ?", (session_id, workspace_id, limit))
+    for row in rows:
+        row["evidence_ids"] = json.loads(row["evidence_ids"])
+    return list(reversed(rows))
+
+
+def generate_security_questionnaire() -> dict[str, Any]:
+    priority = {"gap": 0, "partial": 1, "review": 2, "clear": 3}
+    answers = [{"question": item["name"], "answer": item["answer"], "status": item["status"],
+                "confidence": item["confidence"], "evidence_ids": item["evidence"],
+                "conflict_or_gap": item["contradiction"]} for item in sorted(SECURITY_CONTROLS, key=lambda value: (priority[value["status"]], value["name"]))]
+    return {"company": "Meridian Works (synthetic example)", "generated_at": utc_now(), "golden_rule": "Unknown claims remain unknown.", "answers": answers}
 
 
 def recompute_findings(connection: sqlite3.Connection | None = None) -> None:
@@ -694,8 +726,13 @@ def answer_question(question: str, workspace_id: str = "business", selected_id: 
             if record:
                 safe = {key: value for key, value in record.items() if "hash" not in key}
                 return ChatResult(f"Here is the loaded evidence for {selected_id}: {json.dumps(safe, default=str)}", [record.get("source_id", selected_id)], [selected_id])
+    if workspace_id == "business":
+        return ChatResult(
+            "Unknown. The loaded evidence does not support that security claim. Please provide the relevant policy, system export, audit report, or a named control owner who can answer a targeted follow-up.",
+            [], [selected_id] if selected_id else [], {"status": "unknown", "evidence_count": 0},
+        )
     return ChatResult(
-        "I cannot answer that from the loaded evidence yet. Try asking what changed, why a payment was flagged, about duplicate invoices, office spending, receipts, largest payments, or the available financial data.",
+        "I cannot answer that from the loaded evidence yet. Try asking about Amazon, receipts, largest purchases, or possible spending cuts.",
         [], [selected_id] if selected_id else [],
     )
 

@@ -1,0 +1,7 @@
+SYNTHETIC IDENTITY PROVIDER EXPORT
+Generated: 2026-09-04
+
+Production identities: 18
+MFA enrolled: 16
+MFA exempt: svc-deploy, svc-reporting
+Exception owners: not present in export

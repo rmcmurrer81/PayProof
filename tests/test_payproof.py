@@ -65,6 +65,21 @@ class PayProofCoreTests(unittest.TestCase):
         result = core.answer_question("Do you have ISO 27001 certification?", "business")
         self.assertTrue(result.answer.startswith("Unknown."))
         self.assertEqual(result.evidence_ids, [])
+        general = core.answer_question("Are you FedRAMP authorized?", "business")
+        self.assertTrue(general.answer.startswith("Unknown."))
+        self.assertEqual(general.calculation["evidence_count"], 0)
+
+    def test_questionnaire_generation_prioritizes_gaps_and_cites_every_answer(self):
+        questionnaire = core.generate_security_questionnaire()
+        self.assertEqual(len(questionnaire["answers"]), 7)
+        self.assertEqual(questionnaire["answers"][0]["status"], "gap")
+        self.assertTrue(all(answer["evidence_ids"] for answer in questionnaire["answers"]))
+
+    def test_chat_memory_persists_and_separates_workspaces(self):
+        result = core.answer_question("Is MFA enabled?", "business")
+        core.record_chat_turn("memory-test", "business", "Is MFA enabled?", result)
+        self.assertEqual(len(core.list_chat_history("memory-test", "business")), 2)
+        self.assertEqual(core.list_chat_history("memory-test", "personal"), [])
 
     def test_destination_change_is_high_risk_and_evidence_grounded(self):
         dashboard = core.get_dashboard("business")
@@ -143,7 +158,9 @@ class PayProofApiTests(unittest.TestCase):
         self.client = app_module.app.test_client()
 
     def test_judge_startup_endpoints(self):
-        self.assertEqual(self.client.get("/").status_code, 200)
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        response.close()
         dashboard = self.client.get("/api/dashboard?workspace=business")
         self.assertEqual(dashboard.status_code, 200)
         self.assertEqual(dashboard.get_json()["workspace"], "business")
@@ -156,6 +173,8 @@ class PayProofApiTests(unittest.TestCase):
         self.assertTrue(sources["gmail"]["credentials_available"])
         self.assertTrue(sources["intake_folder"]["available"])
         self.assertEqual(self.client.post("/api/sources/intake/scan").status_code, 200)
+        questionnaire = self.client.get("/api/security/questionnaire").get_json()
+        self.assertEqual(len(questionnaire["answers"]), 7)
 
     def test_empty_chat_and_bad_action_have_clear_errors(self):
         self.assertEqual(self.client.post("/api/chat", json={"question": ""}).status_code, 400)
