@@ -4891,17 +4891,120 @@ def prism_status() -> dict[str, Any]:
     configured = bool(os.getenv("PRISMTRACE_PROJECT_ID") and os.getenv("PRISMTRACE_API_KEY"))
     queued = 0
     if TRACE_QUEUE_PATH.exists():
-        queued = sum(1 for line in TRACE_QUEUE_PATH.read_text(encoding="utf-8").splitlines() if line.strip())
+        try:
+            with _PRISM_QUEUE_LOCK:
+                queued = sum(
+                    1 for line in TRACE_QUEUE_PATH.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                )
+        except OSError:
+            queued = 0
     return {"state": "configured" if configured else "not_configured", "queued": queued,
             "host": os.getenv("PRISMTRACE_HOST", "https://prism.blockconvey.com")}
 
 
-def send_prism_trace(question: str, result: ChatResult, session_id: str, latency_ms: int,
-                     workspace_id: str) -> dict[str, Any]:
-    project_id = os.getenv("PRISMTRACE_PROJECT_ID")
-    api_key = os.getenv("PRISMTRACE_API_KEY")
-    host = os.getenv("PRISMTRACE_HOST", "https://prism.blockconvey.com").rstrip("/")
-    trace_id = str(uuid.uuid4())
+_PRISM_QUEUE_LOCK = threading.RLock()
+_PRISM_PRIVATE_KEY = re.compile(
+    r"-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----",
+    re.IGNORECASE | re.DOTALL,
+)
+_PRISM_AUTHORIZATION = re.compile(
+    r"(?i)\b(?:proxy[-_ ]?)?authorization\s*[:=]\s*(?:bearer|basic)?\s*[A-Za-z0-9+/._=-]{6,}"
+)
+_PRISM_SECRET_ASSIGNMENT = re.compile(
+    r'''(?ix)
+        (["']?(?:api[-_ ]?key|client[-_ ]?secret|access[-_ ]?token|
+          refresh[-_ ]?token|password|passwd|secret)["']?\s*[:=]\s*)
+        (["']?)[^"'\s,;}]{4,}\2
+    ''',
+)
+_PRISM_TOKEN_SHAPE = re.compile(
+    r"(?i)\b(?:pt-sk-|sk-|tvly-|access-(?:sandbox|development|production)-)[A-Za-z0-9._-]{6,}\b"
+)
+_PRISM_EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+_PRISM_AMOUNT = re.compile(
+    r"(?i)(?<![A-Z0-9])(?:USD|EUR|GBP|CAD|AUD)\s*[\$\u20ac\u00a3]?[0-9][0-9,]*(?:\.\d{1,2})?"
+    r"|(?<![A-Z0-9])[\$\u20ac\u00a3][0-9][0-9,]*(?:\.\d{1,2})?"
+)
+_PRISM_MASKED_ACCOUNT = re.compile(r"(?<!\w)(?:\*{2,}|x{2,})[- ]?\d{2,6}(?!\d)", re.IGNORECASE)
+_PRISM_ACCOUNT_NUMBER = re.compile(
+    r"(?i)\b(?:bank\s+)?(?:account|routing)\s*(?:number|no\.?|#)?\s*[:=]?\s*\d{4,19}\b"
+)
+_PRISM_LONG_NUMBER = re.compile(r"(?<!\d)\d{8,19}(?!\d)")
+
+
+def _prism_workspace_terms(workspace_id: str) -> tuple[list[str], list[str]]:
+    """Return saved employee and vendor names so trace text can be pseudonymized."""
+
+    try:
+        with closing(_connect()) as connection:
+            employees = [
+                str(row[0]).strip() for row in connection.execute(
+                    "SELECT name FROM employees WHERE workspace_id=?", (workspace_id,),
+                ).fetchall()
+                if str(row[0] or "").strip()
+            ]
+            vendors = [
+                str(row[0]).strip() for row in connection.execute(
+                    "SELECT name FROM vendors WHERE workspace_id=?", (workspace_id,),
+                ).fetchall()
+                if str(row[0] or "").strip()
+            ]
+    except sqlite3.Error:
+        return [], []
+    return (
+        sorted(set(employees), key=len, reverse=True),
+        sorted(set(vendors), key=len, reverse=True),
+    )
+
+
+def _prism_safe_text(value: Any, *, employees: list[str] | None = None,
+                     vendors: list[str] | None = None, max_chars: int) -> str:
+    """Create a bounded observability summary without raw secrets or financial identifiers."""
+
+    text = str(value or "")
+    text = _PRISM_PRIVATE_KEY.sub("[REDACTED_PRIVATE_KEY]", text)
+    text = _PRISM_AUTHORIZATION.sub("Authorization: [REDACTED_SECRET]", text)
+    text = _PRISM_SECRET_ASSIGNMENT.sub(
+        lambda match: f"{match.group(1)}[REDACTED_SECRET]", text,
+    )
+    text = _PRISM_TOKEN_SHAPE.sub("[REDACTED_SECRET]", text)
+    text = _PRISM_EMAIL.sub("[EMAIL]", text)
+    text = _PRISM_AMOUNT.sub("[AMOUNT]", text)
+    text = _PRISM_MASKED_ACCOUNT.sub("[ACCOUNT]", text)
+    text = _PRISM_ACCOUNT_NUMBER.sub("[ACCOUNT]", text)
+    text = _PRISM_LONG_NUMBER.sub("[NUMBER]", text)
+    for name in employees or []:
+        if len(name) >= 3:
+            text = re.sub(re.escape(name), "[EMPLOYEE]", text, flags=re.IGNORECASE)
+    for name in vendors or []:
+        if len(name) >= 3:
+            text = re.sub(re.escape(name), "[VENDOR]", text, flags=re.IGNORECASE)
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_chars:
+        text = f"{text[:max_chars - 14].rstrip()} [TRUNCATED]"
+    return text
+
+
+def _prism_model_details(model_status: dict[str, Any] | None) -> tuple[str, str]:
+    status = model_status if isinstance(model_status, dict) else {}
+    state = str(status.get("state") or "deterministic_fallback")[:80]
+    if state == "deterministic_fallback":
+        return "payproof-deterministic-fallback", state
+    model = _prism_safe_text(
+        status.get("model") or "unknown-model", max_chars=160,
+    )
+    return model or "unknown-model", state
+
+
+def _build_prism_trace_payload(question: str, result: ChatResult, session_id: str,
+                               latency_ms: int, workspace_id: str,
+                               project_id: str | None,
+                               model_status: dict[str, Any] | None,
+                               trace_id: str) -> dict[str, Any]:
+    employees, vendors = _prism_workspace_terms(workspace_id)
+    model, engine = _prism_model_details(model_status)
     try:
         with closing(_connect()) as connection:
             workspace_row = connection.execute(
@@ -4910,28 +5013,100 @@ def send_prism_trace(question: str, result: ChatResult, session_id: str, latency
         synthetic_demo = bool(workspace_row and workspace_row["is_demo"])
     except sqlite3.Error:
         synthetic_demo = False
-    payload = {
-        "project_id": project_id, "model": "payproof-deterministic-fallback",
-        "input_messages": [{"role": "user", "content": question}], "output_message": result.answer,
-        "latency_ms": latency_ms, "session_id": session_id, "trace_id": trace_id,
-        "agent_id": "payproof-atlas", "agent_name": "Ask PayProof",
-        "metadata": {"workspace": workspace_id, "evidence_ids": result.evidence_ids,
-                     "engine": "deterministic-fallback", "synthetic_demo": synthetic_demo},
+    evidence_ids = [
+        _prism_safe_text(item, max_chars=160)
+        for item in list(result.evidence_ids or [])[:16]
+    ]
+    return {
+        "project_id": project_id,
+        "model": model,
+        "input_messages": [{
+            "role": "user",
+            "content": _prism_safe_text(
+                question, employees=employees, vendors=vendors, max_chars=800,
+            ),
+        }],
+        "output_message": _prism_safe_text(
+            result.answer, employees=employees, vendors=vendors, max_chars=1_600,
+        ),
+        "latency_ms": max(0, int(latency_ms)),
+        "session_id": _prism_safe_text(session_id, max_chars=200),
+        "trace_id": trace_id,
+        "agent_id": "payproof-atlas",
+        "agent_name": "Ask PayProof",
+        "metadata": {
+            "workspace": workspace_id,
+            "evidence_ids": evidence_ids,
+            "engine": engine,
+            "answer_source": "live_model" if engine == "live_model" else "deterministic",
+            "synthetic_demo": synthetic_demo,
+            "content_policy": "minimized_and_redacted_v1",
+        },
     }
+
+
+def _queue_prism_payload(payload: dict[str, Any]) -> bool:
+    try:
+        with _PRISM_QUEUE_LOCK:
+            RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+            with TRACE_QUEUE_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        return True
+    except OSError:
+        return False
+
+
+def send_prism_trace(question: str, result: ChatResult, session_id: str, latency_ms: int,
+                     workspace_id: str, model_status: dict[str, Any] | None = None,
+                     *, trace_id: str | None = None) -> dict[str, Any]:
+    project_id = os.getenv("PRISMTRACE_PROJECT_ID")
+    api_key = os.getenv("PRISMTRACE_API_KEY")
+    host = os.getenv("PRISMTRACE_HOST", "https://prism.blockconvey.com").rstrip("/")
+    trace_id = trace_id or str(uuid.uuid4())
     if not project_id or not api_key:
         return {"state": "not_configured", "trace_id": trace_id}
+    payload = _build_prism_trace_payload(
+        question, result, session_id, latency_ms, workspace_id,
+        project_id, model_status, trace_id,
+    )
     request = urllib.request.Request(f"{host}/api/traces", data=json.dumps(payload).encode("utf-8"), method="POST",
                                      headers={"Content-Type": "application/json", "X-PRISMtrace-Key": api_key})
     try:
         with urllib.request.urlopen(request, timeout=4) as response:
             body = json.loads(response.read().decode("utf-8"))
             return {"state": "accepted", "trace_id": body.get("id", trace_id)}
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
-        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-        with TRACE_QUEUE_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload) + "\n")
-        return {"state": "queued", "trace_id": trace_id, "error": type(exc).__name__}
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
+            UnicodeDecodeError, json.JSONDecodeError) as exc:
+        queued = _queue_prism_payload(payload)
+        return {
+            "state": "queued" if queued else "not_submitted",
+            "trace_id": trace_id,
+            "error": type(exc).__name__,
+        }
 
 
-def trace_chat_async(question: str, result: ChatResult, session_id: str, latency_ms: int, workspace_id: str) -> None:
-    threading.Thread(target=send_prism_trace, args=(question, result, session_id, latency_ms, workspace_id), daemon=True).start()
+def trace_chat_async(question: str, result: ChatResult, session_id: str,
+                     latency_ms: int, workspace_id: str,
+                     model_status: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Submit PRISM delivery to a background worker without claiming remote acceptance."""
+
+    trace_id = str(uuid.uuid4())
+    if not os.getenv("PRISMTRACE_PROJECT_ID") or not os.getenv("PRISMTRACE_API_KEY"):
+        return {"state": "not_configured", "trace_id": trace_id, "accepted": False}
+    worker = threading.Thread(
+        target=send_prism_trace,
+        args=(question, result, session_id, latency_ms, workspace_id, model_status),
+        kwargs={"trace_id": trace_id},
+        daemon=True,
+        name=f"payproof-prism-{trace_id[:8]}",
+    )
+    try:
+        worker.start()
+    except RuntimeError:
+        return {"state": "not_submitted", "trace_id": trace_id, "accepted": False}
+    return {
+        "state": "submitted",
+        "trace_id": trace_id,
+        "accepted": False,
+        "delivery": "background",
+    }

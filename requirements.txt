@@ -3,3 +3,4 @@ google-api-python-client>=2.170,<3
 google-auth-oauthlib>=1.2,<2
 rapidocr>=3.9,<4
 onnxruntime>=1.22,<2
+prismtrace-sdk>=0.4,<1

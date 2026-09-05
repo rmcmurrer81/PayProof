@@ -63,9 +63,9 @@ from src.core import (
     restore_company_workspace,
     scan_intake_folder,
     save_company_logo,
-    send_prism_trace,
     set_employee_budget,
     sync_plaid_transactions,
+    trace_chat_async,
     update_intake_folder,
     update_company_workspace,
     utc_now,
@@ -271,8 +271,10 @@ def chat():
     )
     result, model_status = explain_with_runtime_model(question, result)
     latency = round((time.perf_counter() - started) * 1000)
-    trace = send_prism_trace(question, result, session_id, latency, workspace)
     record_chat_turn(session_id, workspace, question, result)
+    trace = trace_chat_async(
+        question, result, session_id, latency, workspace, model_status,
+    )
     return jsonify({"answer": result.answer, "evidence_ids": result.evidence_ids, "focus_ids": result.focus_ids, "model": model_status,
                     "calculation": result.calculation, "context": {"workspace": workspace, "selected_id": selected_id,
                     "evidence_ids": result.evidence_ids, "calculation": result.calculation}, "trace": trace})
