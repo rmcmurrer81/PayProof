@@ -84,6 +84,10 @@
         <div class="assistant-orb"><i></i></div>
       </div>
       <div class="assistant-badges"><span>BOUNDED CONTEXT</span><span>DETERMINISTIC MATH</span></div>
+      <div class="voice-controls" aria-label="Hands-free controls">
+        <div class="voice-buttons"><button id="micToggle" class="voice-button" type="button" aria-pressed="false" title="Start microphone input; your browser may ask for permission">◉ Mic off</button><button id="spokenRepliesToggle" class="voice-button" type="button" aria-pressed="false" disabled>♩ Spoken replies off</button></div>
+        <span id="voiceStatus" role="status" aria-live="polite">Voice controls are off and start only when clicked.</span>
+      </div>
       <div id="suggestions" class="suggestions">
         <button>Is MFA enabled?</button><button>Are backups current?</button><button>Who has production access?</button><button>Complete the questionnaire</button>
       </div>

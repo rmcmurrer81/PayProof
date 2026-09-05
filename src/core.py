@@ -23,6 +23,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
+from .company_transfer import build_company_transfer_zip, suggested_transfer_filename
 from .model_grounding import validate_model_rewording
 from .security_runtime import build_security_view, questionnaire_payload
 from .workspace_rules import (
@@ -538,6 +539,34 @@ def restore_company_workspace(workspace_id: str, *, confirmed: bool = False) -> 
             "SELECT * FROM workspaces WHERE id=?", (workspace_id,),
         ).fetchone()
     return {**_workspace_payload(updated), "restored": True, "state": "active"}
+
+
+def create_company_transfer_package(workspace_id: str, *, confirmed: bool = False,
+                                    expected_name: str = "") -> tuple[bytes, str]:
+    """Create a portable, credential-free evidence package for a company sale."""
+
+    workspace_id = require_workspace(workspace_id)
+    if not confirmed:
+        raise ValueError("Explicit confirmation is required to transfer company records")
+    with closing(_connect()) as connection:
+        row = connection.execute(
+            "SELECT * FROM workspaces WHERE id=?", (workspace_id,),
+        ).fetchone()
+        if not row or row["kind"] != "company" or row["is_demo"]:
+            raise ValueError("Only a custom company workspace can be transferred")
+        if str(expected_name or "").strip() != row["name"]:
+            raise ValueError("Type the exact company name to confirm the transfer package")
+        payload = build_company_transfer_zip(connection, workspace_id)
+        filename = suggested_transfer_filename(row["name"])
+        connection.execute(
+            """INSERT INTO audit(workspace_id, finding_id, action, reason, created_at)
+               VALUES (?, NULL, 'export_company_transfer', ?, ?)""",
+            (workspace_id,
+             "Generated credential-free portable company transfer package",
+             utc_now()),
+        )
+        connection.commit()
+    return payload, filename
 
 
 def _company_logo_type(content: bytes) -> tuple[str, str]:

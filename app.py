@@ -30,6 +30,7 @@ from src.core import (
     correct_intake_expense,
     create_plaid_link_token,
     create_company_workspace,
+    create_company_transfer_package,
     disconnect_plaid_connection,
     explain_with_runtime_model,
     exchange_plaid_public_token,
@@ -163,6 +164,25 @@ def workspace_restore(workspace_id: str):
         ))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/workspaces/<workspace_id>/transfer-package")
+def workspace_transfer_package(workspace_id: str):
+    payload = request.get_json(silent=True) or {}
+    try:
+        archive, filename = create_company_transfer_package(
+            workspace_id,
+            confirmed=payload.get("confirm") is True,
+            expected_name=str(payload.get("company_name") or ""),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    response = Response(archive, mimetype="application/zip")
+    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-PayProof-Credentials-Included"] = "false"
+    return response
 
 
 @app.get("/api/workspaces/<workspace_id>/logo")

@@ -1,63 +1,58 @@
-# PayProof Atlas: 75-second judge demo
+# PayProof Atlas: 80-second judge demo
 
-## Demo objective
+## Pitch objective
 
-Show one evidence-backed control conflict, one financially useful spending suggestion, and the workspace/source safety boundary. The story is: **less time chasing records, more confidence before a human acts.**
+Show that PayProof turns scattered small-business records into reviewable evidence without guessing or moving money. The three proof points are a control conflict, an itemized bank/email match, and a useful spending suggestion inside a strict company boundary.
 
-## Preflight checklist
+## Preflight
 
-- [ ] Run `Start PayProof.cmd` and wait for the browser to open after the health check.
-- [ ] Use the bundled synthetic data; a live bank or Gmail account is not required.
-- [ ] Start in the **Meridian Works** workspace with the Atlas view visible and drawers closed.
-- [ ] Confirm the **Backup operations** control is visible in the left rail.
-- [ ] Confirm **Personal Example** is available in the workspace picker.
-- [ ] If PRISM or the runtime model is not configured, leave the truthful **NEEDS KEY** or **LOCAL FALLBACK** label visible.
-- [ ] Do not open a live connector during the timed pitch unless its sandbox/test setup was verified immediately beforehand.
-- [ ] Start the timer only after the dashboard is fully loaded.
+- [ ] Run `Start PayProof.cmd`; start recording only after the dashboard loads.
+- [ ] Use the bundled fictional data. No live account is required.
+- [ ] Start in **Meridian Works** with the Atlas visible and drawers closed.
+- [ ] Confirm **Personal Example** appears in the company picker.
+- [ ] Rehearse asking: `What did the $43.57 Amazon bank transaction buy?`
+- [ ] Leave **LOCAL FALLBACK** or **NEEDS KEY** visible when the runtime model or PRISM is not configured.
+- [ ] Never label a mocked connector test as Live.
 
 ## Timed script
 
 | Time | On screen | Say |
 |---|---|---|
-| 0-8 sec | Meridian Works evidence atlas | "Small finance teams investigate across bank portals, inboxes, receipts, and intake folders. PayProof brings those records into one evidence map so they can see what changed before money moves." |
-| 8-23 sec | Click **Are backups current?**, then point to **Backup operations** | "Here, policy says backups must run daily, but the operating evidence shows failed jobs. PayProof calls that a conflict, cites the record, and asks for the missing owner or restore evidence instead of inventing compliance." |
-| 23-34 sec | Point to the evidence IDs and open **Context used** | "The math and control result are deterministic. A model can only reword this bounded packet; it cannot change the numbers, sources, uncertainty, or approval state." |
-| 34-51 sec | Switch to **Personal Example** and ask **Where could I cut spending?** | "The same engine spots a sudden increase against the prior monthly baseline and suggests a possible cut. Crucially, Amazon alone does not prove food or drinks; PayProof only names a category when email, receipt, or intake evidence itemizes it." |
-| 51-66 sec | Open **Sources & settings** | "Every bank connection, Gmail authorization, local statement, and intake folder is assigned to the active company workspace. Imports are previewed, reconciliation links are suggestions, and corrections preserve their full history." |
-| 66-75 sec | Leave Sources open or return to the atlas | "Our Golden Rule is simple: evidence may inform a decision, but it never authorizes one. PayProof does not move money; it gives the human a defensible next step and an audit trail." |
+| 0–8 sec | Meridian Works evidence atlas | “Small businesses investigate money and risk across bank portals, inboxes, receipts, and intake folders. PayProof brings those records into one evidence workspace before anyone acts.” |
+| 8–21 sec | Click **Are backups current?** | “Here, policy requires daily backups, but operating evidence shows failed jobs. PayProof reports the conflict, cites both sources, and asks for the missing restore evidence instead of inventing compliance.” |
+| 21–39 sec | Switch to **Personal Example**; ask **What did the $43.57 Amazon bank transaction buy?** | “This bank row and email agree on exact amount, currency, date, merchant, and order reference. Only then does PayProof show the email’s explicit items—coffee filters and sparkling water—with both evidence IDs. If two emails tie, it says ambiguous and withholds the items.” |
+| 39–53 sec | Ask **Where could I cut spending?** | “PayProof compares the latest 30 days with the prior monthly baseline and suggests a possible cut. It keeps the calculation visible and calls it a review suggestion, not a conclusion.” |
+| 53–69 sec | Open **Sources**; point to company manager and connector sections | “Each company has its own website, logo, banks, read-only Gmail evidence, and custom intake folders. Switching companies changes the dashboard and the assistant’s evidence boundary. A closed company is safely archived, with records preserved for restore.” |
+| 69–80 sec | Return to the atlas or leave Sources open | “The Golden Rule is simple: evidence may inform a decision, but it never authorizes one. PayProof does not move money—it gives the human a defensible next step and an audit trail.” |
 
 ## Presenter cues
 
-- Keep the cursor near the element being discussed; do not tour every control.
-- Let the assistant finish before speaking about its evidence IDs.
-- Say **conflict**, **anomaly**, or **suggestion**. Do not say **fraud**, **approved**, or **compliant** unless the displayed evidence supports it.
-- Call the provider status **Mocked** when showing automated Plaid or Gmail tests. Use **Live** only after a successful real provider response.
-- If the model badge says **LOCAL FALLBACK**, frame it as a feature: the deterministic workflow remains usable without a model endpoint.
-- If the PRISM badge says **NEEDS KEY**, say that live trace delivery requires the submission credentials; do not imply a trace was accepted.
+- Keep the cursor near the evidence being discussed; do not tour every control.
+- Let the assistant finish before pointing to its evidence IDs.
+- Say **conflict**, **anomaly**, **ambiguous**, or **suggestion**. Do not say **fraud**, **approved**, or **compliant** unless the displayed evidence supports it.
+- Identify the default companies, emails, transactions, employees, and security records as synthetic.
+- If the model badge says **LOCAL FALLBACK**, say deterministic answers remain available without a model endpoint.
+- If PRISM says **NEEDS KEY**, say live trace delivery requires configured credentials. Do not imply a trace was accepted.
+- Do not open Plaid Link or Gmail OAuth during the timed pitch unless that exact sandbox/test flow was verified immediately beforehand.
 
-## Ten-second optional company-workspace extension
+## Optional transfer extension
 
-Use this only if the total recording can reach 85 seconds and the current build was preflighted:
-
-1. Open the workspace controls and show a custom company.
-2. Open **Sources & settings** for that company.
-3. Say: "Source assignment follows the selected company, so identical upstream IDs cannot overwrite another workspace's records."
-
-Do not create a new company or browse for an intake folder live unless that exact flow was rehearsed on the recording machine.
+Use only if the recording remains under 90 seconds and the transfer control is present in the tested build: open the company transfer preview and say, “If the business is sold, the owner can download its paperwork as ordinary HTML, CSV, and JSON with a SHA-256 manifest. The buyer can read it in a browser without installing PayProof, and credentials are excluded.”
 
 ## Recovery lines
 
-- **Provider not configured:** "The connector is intentionally disabled until server credentials and protected token storage are present; local statement import still works."
-- **Model unavailable:** "PayProof keeps the deterministic answer and labels the fallback instead of hiding the failure."
-- **PRISM delivery unavailable:** "The UI does not claim acceptance; a configured failed delivery is queued locally for retry."
-- **Short on time:** Skip **Context used** and move directly from the backup conflict to the spending suggestion.
+- **Provider not configured:** “The connector is disabled until server credentials and protected token storage are present; local statement import still works.”
+- **Model unavailable:** “PayProof keeps the deterministic answer and labels the fallback instead of hiding the failure.”
+- **PRISM unavailable:** “The UI does not claim acceptance; a configured failed delivery is queued locally for retry.”
+- **Short on time:** Skip the spending question and move from the $43.57 match to Sources, then close.
 
-## Final recording checklist
+## Final recording gate
 
-- [ ] Duration is between 60 and 90 seconds.
-- [ ] Default data is identified as synthetic.
-- [ ] At least one cited evidence conflict is visible.
+- [ ] Duration is 60–90 seconds.
+- [ ] The bundled data is called synthetic.
+- [ ] A conflict and its citations are visible.
+- [ ] The $43.57 match shows both bank and email evidence and remains review-required.
 - [ ] The spending suggestion includes a baseline and uncertainty.
-- [ ] Multi-company source assignment is stated without exposing credentials.
-- [ ] No connector is called Live unless it actually succeeded.
-- [ ] The close explicitly says PayProof does not move money.
+- [ ] Company-scoped sources and reversible archive behavior are stated.
+- [ ] No live model, connector, or PRISM claim is made without a verified response.
+- [ ] The close says PayProof does not move money.

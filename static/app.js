@@ -1,4 +1,4 @@
-const state={data:null,workspace:'business',view:new URLSearchParams(location.search).get('view')||'atlas',selectedId:'invoice:INV-1007',selectedFinding:'F-ROUTE-001',zoom:1,pan:{x:0,y:0},yaw:-.32,nodes:[],sessionId:`payproof-${Date.now()}`,lastContext:null,demoStep:0,sourceConfig:null,bankPreview:null,activePlaidHandler:null,oauthPoll:null,loadGeneration:0,sourceGeneration:0,workspaceGeneration:0,changeCurrencyByWorkspace:{}};
+const state={data:null,workspace:'business',view:new URLSearchParams(location.search).get('view')||'atlas',selectedId:'invoice:INV-1007',selectedFinding:'F-ROUTE-001',zoom:1,pan:{x:0,y:0},yaw:-.32,nodes:[],sessionId:`payproof-${Date.now()}`,lastContext:null,demoStep:0,sourceConfig:null,bankPreview:null,activePlaidHandler:null,oauthPoll:null,loadGeneration:0,sourceGeneration:0,workspaceGeneration:0,chatPending:false,changeCurrencyByWorkspace:{},voice:{recognition:null,inputAvailable:false,micState:'off',spokenReplies:false,replyVoice:null,statusMessage:'',voicesBound:false}};
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const riskColor={clear:'#3cf0a5',review:'#ffc64d',high:'#ff5274'};
 const money=(cents,currency='USD')=>new Intl.NumberFormat('en-US',{style:'currency',currency}).format(cents/100);
@@ -11,13 +11,72 @@ const api=async(url,options={})=>{
 };
 const jsonRequest=(method,payload)=>({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
 
+function workspaceInitials(name){
+  const words=String(name||'Company').trim().split(/\s+/).filter(Boolean);
+  return (words.length>1?`${Array.from(words[0])[0]||''}${Array.from(words.at(-1))[0]||''}`:Array.from(words[0]||'CO').slice(0,2).join('')).toUpperCase();
+}
+function safeWebsiteUrl(value){
+  const raw=String(value||'').trim();
+  if(!raw)return null;
+  try{
+    const candidate=/^[a-z][a-z0-9+.-]*:/i.test(raw)?raw:`https://${raw}`;
+    const url=new URL(candidate);
+    if(!['http:','https:'].includes(url.protocol)||url.username||url.password)return null;
+    return url.href;
+  }catch{return null}
+}
+function safeCompanyLogoUrl(value,workspaceId){
+  const raw=String(value||'').trim();
+  if(!raw||!workspaceId)return null;
+  try{
+    const url=new URL(raw,location.origin),expectedPath=`/api/workspaces/${encodeURIComponent(workspaceId)}/logo`;
+    if(url.origin!==location.origin||url.pathname!==expectedPath||!['http:','https:'].includes(url.protocol))return null;
+    return url.href;
+  }catch{return null}
+}
+function safeTransferFilename(header,fallback='payproof-transfer.zip'){
+  const raw=String(header||'');
+  let candidate='';
+  const encoded=raw.match(/filename\*\s*=\s*(?:UTF-8'')?([^;]+)/i);
+  const plain=raw.match(/filename\s*=\s*("[^"]*"|[^;]+)/i);
+  if(encoded){
+    candidate=encoded[1].trim().replace(/^"|"$/g,'');
+    try{candidate=decodeURIComponent(candidate)}catch{}
+  }else if(plain){candidate=plain[1].trim().replace(/^"|"$/g,'')}
+  candidate=(candidate||fallback).split(/[\\/]/).at(-1).replace(/[<>:"/\\|?*\u0000-\u001f\u007f]+/g,'_').trim().replace(/[. ]+$/g,'');
+  if(!candidate)candidate=fallback;
+  if(!/\.zip$/i.test(candidate))candidate=`${candidate}.zip`;
+  return candidate.length>180?`${candidate.slice(0,176)}.zip`:candidate;
+}
+function renderActiveCompanyBranding(){
+  const workspace=(state.data?.workspaces||[]).find(item=>item.id===state.workspace)||state.sourceConfig?.currentWorkspace||{id:state.workspace,name:state.workspace,is_demo:false};
+  const name=String(workspace.name||state.workspace),initials=workspaceInitials(name),logoUrl=safeCompanyLogoUrl(workspace.logo_url,workspace.id),websiteUrl=safeWebsiteUrl(workspace.website);
+  const logo=$('#activeCompanyLogo'),fallback=$('#activeCompanyInitials');
+  $('#activeCompanyName').textContent=name;
+  $('#activeCompanyContext').textContent=name.toUpperCase();
+  fallback.textContent=initials;fallback.hidden=false;
+  logo.hidden=true;logo.removeAttribute('src');logo.alt=`${name} logo`;
+  if(logoUrl){
+    logo.onload=()=>{if(state.workspace===workspace.id){logo.hidden=false;fallback.hidden=true}};
+    logo.onerror=()=>{logo.hidden=true;fallback.hidden=false;logo.removeAttribute('src')};
+    logo.src=logoUrl;
+  }
+  const website=$('#activeCompanyWebsite');
+  website.hidden=!websiteUrl;website.removeAttribute('href');website.textContent='';
+  if(websiteUrl){const parsed=new URL(websiteUrl);website.href=websiteUrl;website.textContent=parsed.hostname.replace(/^www\./i,'')}
+  const typePill=$('#workspaceTypePill');
+  typePill.textContent=workspace.is_demo?'SYNTHETIC EXAMPLE':'CUSTOM COMPANY';
+  typePill.className=`pill ${workspace.is_demo?'cyan':'good'}`;
+  document.title=`PayProof Atlas · ${name}`;
+}
+
 async function loadData(){
   const workspace=state.workspace,generation=++state.loadGeneration;
   const data=await api(`/api/dashboard?workspace=${encodeURIComponent(workspace)}`);
   if(workspace!==state.workspace||generation!==state.loadGeneration)return false;
   state.data=data;
   if(state.workspace==='business'&&state.data.security?.graph?.nodes?.length)state.data.graph=state.data.security.graph;
-  renderWorkspaceOptions();renderMetrics();renderFindings();renderFocus();renderVisual();renderPrism();syncNav();
+  renderWorkspaceOptions();renderActiveCompanyBranding();renderMetrics();renderFindings();renderFocus();renderVisual();renderPrism();syncNav();
   $('#updatedAt').textContent=`Updated ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`;
   return true;
 }
@@ -121,11 +180,16 @@ function bankConnectionHtml(connection){
   const connected=connection.state==='connected';
   return `<article class="source-card compact"><div class="source-card-head"><div><b>${escapeHtml(connection.institution||'Connected institution')}</b><span class="status-chip ${connected?'good':'warn'}">${escapeHtml(connection.state||'connected')}</span></div></div><p>${masks}</p><p class="source-meta">Last sync: ${escapeHtml(readableTime(connection.last_synced_at))}</p><div class="modal-actions"><button class="button ghost bank-sync" data-bank-id="${id}" ${connected?'':'disabled'}>Sync now</button><button class="button danger bank-disconnect" data-bank-id="${id}">${connected?'Disconnect':'Finish disconnect'}</button></div></article>`;
 }
+function reconciliationMatchHtml(row,match){
+  const bank=row.bank_transaction||{},context=match.context||{},items=Array.isArray(context.itemization)?context.itemization.filter(item=>String(item||'').trim()).slice(0,12):[];
+  const emailFacts=[context.sender?`From ${context.sender}`:'',context.subject?`Subject: ${context.subject}`:'',context.received_at?`Received ${context.received_at}`:''].filter(Boolean);
+  const stateLabel=String(row.match_state||'suggested').replaceAll('_',' ');
+  return `<details class="match-detail"><summary><span><b>${escapeHtml(bank.description||bank.id||'Bank transaction')}</b><small>${escapeHtml(bank.posted_on||'')} ${bank.amount_cents!=null?`· ${escapeHtml(safeMoney(bank.amount_cents,bank.currency))}`:''}</small></span><span class="match-labels"><i>Suggested</i><i class="review">Review required</i>${row.ambiguous?'<i class="ambiguous">Ambiguous</i>':''}</span></summary><div class="match-context"><div class="match-source"><span>${escapeHtml(match.type||'evidence')}</span><b>${escapeHtml(match.evidence_id||'unknown')}</b><strong>${safeCount(match.confidence)}% · ${escapeHtml(stateLabel)}</strong></div>${emailFacts.length?`<p>${emailFacts.map(escapeHtml).join(' · ')}</p>`:''}${items.length?`<p class="itemization"><b>Items:</b> ${items.map(escapeHtml).join(' · ')}${Array.isArray(context.itemization)&&context.itemization.length>items.length?` · +${context.itemization.length-items.length} more`:''}</p>`:''}${context.untrusted_document_text?'<p class="untrusted-note">Email text is treated as untrusted evidence. The message snippet is intentionally hidden.</p>':''}</div></details>`;
+}
 function reconciliationHtml(reconciliation){
   const summary=reconciliation?.summary||{},rows=Array.isArray(reconciliation?.rows)?reconciliation.rows:[];
-  const suggested=rows.filter(row=>Array.isArray(row.matches)&&row.matches.length).slice(0,6);
-  const details=suggested.map(row=>{const bank=row.bank_transaction||{},match=row.matches[0]||{};return `<div class="match-row"><span>${escapeHtml(bank.description||bank.id)}</span><strong>${escapeHtml(match.type||'evidence')} · ${escapeHtml(match.evidence_id||'unknown')} · ${safeCount(match.confidence)}%</strong></div>`}).join('');
-  return `<details class="reconciliation-box"><summary><span>Evidence matching</span><b>${safeCount(summary.with_suggestions)} suggested · ${safeCount(summary.unmatched)} unmatched</b></summary><p>Bank rows are compared with invoices, receipts, intake expenses, and imported email. Matches are suggestions and are never confirmed automatically.</p>${details||'<p class="empty-state">No suggested evidence matches yet.</p>'}</details>`;
+  const matches=rows.filter(row=>Array.isArray(row.matches)&&row.matches.length).flatMap(row=>row.matches.slice(0,3).map(match=>reconciliationMatchHtml(row,match))).slice(0,8).join('');
+  return `<details class="reconciliation-box"><summary><span>Evidence matching</span><b>${safeCount(summary.with_suggestions)} suggested · ${safeCount(summary.unmatched)} unmatched</b></summary><p>Bank rows are compared with invoices, receipts, intake expenses, and imported email. Every match is a suggestion and requires review; none is confirmed automatically.</p><div class="match-list">${matches||'<p class="empty-state">No suggested evidence matches yet.</p>'}</div></details>`;
 }
 function importedSourceHtml(source){
   const id=escapeHtml(source.id),kind=String(source.kind||'source');
@@ -135,16 +199,26 @@ function importedSourceHtml(source){
 function intakeExpenseHtml(expense){
   return `<article class="intake-row"><div><b>${escapeHtml(expense.id)}</b><span>${escapeHtml(expense.merchant)} · ${escapeHtml(safeMoney(expense.amount_cents,expense.currency))}</span><small>${escapeHtml(expense.spent_on)} · ${escapeHtml(expense.receipt_status)} · ${escapeHtml(expense.approval_status)}</small></div><button class="button ghost edit-intake" data-expense-id="${escapeHtml(expense.id)}">Edit & history</button></article>`;
 }
-function companyManagerHtml(workspaces,current){
+function companyIdentityHtml(current){
+  const name=String(current?.name||state.workspace),logoUrl=safeCompanyLogoUrl(current?.logo_url,current?.id),websiteUrl=safeWebsiteUrl(current?.website),initials=workspaceInitials(name);
+  return `<div class="company-profile-summary"><div class="company-profile-logo"><img id="companyProfileLogo" src="${logoUrl?escapeHtml(logoUrl):''}" alt="${escapeHtml(name)} logo" ${logoUrl?'':'hidden'}><span id="companyProfileInitials" ${logoUrl?'hidden':''}>${escapeHtml(initials)}</span></div><div class="company-profile-copy"><strong>${escapeHtml(name)}</strong>${websiteUrl?`<a href="${escapeHtml(websiteUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(new URL(websiteUrl).hostname.replace(/^www\./i,''))} ↗</a>`:'<span>No company website saved</span>'}</div></div>`;
+}
+function archivedCompanyHtml(company){
+  const websiteUrl=safeWebsiteUrl(company.website);
+  return `<article class="archived-company"><div><b>${escapeHtml(company.name)}</b><span>Removed ${escapeHtml(readableTime(company.archived_at))}</span>${websiteUrl?`<a href="${escapeHtml(websiteUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(new URL(websiteUrl).hostname.replace(/^www\./i,''))} ↗</a>`:''}</div><button class="button ghost restore-company" data-workspace-id="${escapeHtml(company.id)}">Restore</button></article>`;
+}
+function companyManagerHtml(workspaces,current,archivedWorkspaces=[]){
   const options=workspaces.map(workspace=>`<option value="${escapeHtml(workspace.id)}" ${workspace.id===state.workspace?'selected':''}>${escapeHtml(workspace.name)}${workspace.is_demo?' · demo':''}</option>`).join('');
   const custom=current?.kind==='company'&&current?.is_demo!==true;
   return `<section class="settings-section company-manager" aria-labelledby="companySettingsTitle">
     <div class="settings-heading"><div><span class="section-label">ACTIVE COMPANY</span><h3 id="companySettingsTitle">Company manager</h3></div><span class="status-chip ${custom?'good':''}">${custom?'custom company':'demo workspace'}</span></div>
     <p>Banks, Gmail authorization, statement imports, and intake folders connect only to the company selected here. Switching companies clears the visible chat context before loading the next company.</p>
+    ${companyIdentityHtml(current)}
     <div class="company-switcher"><label>Selected company<select id="settingsWorkspaceSelect">${options}</select></label><button id="switchSettingsWorkspace" class="button primary" disabled>Switch company</button></div>
     <dl class="company-counts"><div><dt>Bank records</dt><dd>${safeCount(current?.bank_transaction_count)}</dd></div><div><dt>Gmail evidence</dt><dd>${safeCount(current?.gmail_evidence_count)}</dd></div><div><dt>Enabled intake folders</dt><dd>${safeCount(current?.intake_folder_count)}</dd></div></dl>
-    ${custom?`<form id="renameCompanyForm" class="inline-settings-form"><label>Company name<input name="name" minlength="2" maxlength="100" required value="${escapeHtml(current.name)}"></label><button class="button ghost" type="submit">Rename</button></form>`:''}
-    <details class="add-company"><summary>Add another company</summary><form id="createCompanyForm" class="inline-settings-form"><label>New company name<input name="name" minlength="2" maxlength="100" required placeholder="Example: Northstar Studio"></label><button class="button primary" type="submit">Create & select</button></form></details>
+    ${custom?`<div class="company-profile-settings"><form id="renameCompanyForm" class="company-profile-form"><label>Company name<input name="name" minlength="2" maxlength="100" required value="${escapeHtml(current.name)}"></label><label>Website <span class="source-meta">optional</span><input name="website" type="url" inputmode="url" maxlength="500" placeholder="https://example.com" value="${escapeHtml(current.website||'')}"></label><button class="button ghost" type="submit">Save profile</button></form><div class="company-logo-controls"><label class="file-field">Company logo <span class="source-meta">PNG, JPEG, or WebP · 2 MB maximum</span><input id="companyLogoFile" type="file" accept="image/png,image/jpeg,image/webp"></label><div class="modal-actions"><button id="uploadCompanyLogo" class="button ghost" type="button">Upload logo</button>${current.logo_url?'<button id="removeCompanyLogo" class="button danger" type="button">Remove logo</button>':''}</div></div><div class="company-transfer"><div><b>Transfer financial records</b><p>Download a portable, independently readable package for a buyer, accountant, or successor team.</p></div><button id="transferCompanyRecords" class="button ghost" type="button">Transfer financial records</button></div><div class="company-lifecycle"><div><b>Remove this company</b><p>Removal archives the company from active use. All records, source connections, intake assignments, and history stay preserved for restoration.</p></div><button id="archiveCompany" class="button danger" type="button">Remove company</button></div></div>`:'<p class="source-meta">Demo workspace branding is built in. Create a custom company to add its website and logo. Demo workspaces cannot be removed.</p>'}
+    <details class="add-company"><summary>Add another company</summary><form id="createCompanyForm" class="company-create-form"><label>New company name<input name="name" minlength="2" maxlength="100" required placeholder="Example: Northstar Studio"></label><label>Website <span class="source-meta">optional</span><input name="website" type="url" inputmode="url" maxlength="500" placeholder="https://northstar.example"></label><button class="button primary" type="submit">Create & select</button></form></details>
+    ${archivedWorkspaces.length?`<details class="archived-companies"><summary>Archived companies (${archivedWorkspaces.length})</summary><p>Restore a company to return it to the active selector with its preserved records and connections.</p><div class="archived-company-list">${archivedWorkspaces.map(archivedCompanyHtml).join('')}</div></details>`:''}
   </section>`;
 }
 function intakeFolderHtml(folder){
@@ -155,15 +229,15 @@ async function sourcesDrawer(message='',tone='success'){
   const workspace=state.workspace,generation=++state.sourceGeneration;
   const [s,workspaceResult,folderResult]=await Promise.all([
     api(`/api/sources?workspace=${encodeURIComponent(workspace)}`),
-    api('/api/workspaces'),
+    api('/api/workspaces?include_archived=true'),
     api(`/api/workspaces/${encodeURIComponent(workspace)}/intake-folders`)
   ]);
   if(workspace!==state.workspace||generation!==state.sourceGeneration)return;
   state.bankPreview=null;
   const bank=s.bank||{},gmail=s.gmail||{},connections=Array.isArray(bank.connections)?bank.connections:[];
-  const workspaces=Array.isArray(workspaceResult.workspaces)?workspaceResult.workspaces:[],currentWorkspace=workspaces.find(item=>item.id===workspace)||{id:workspace,name:workspace,kind:'company',is_demo:false};
+  const allWorkspaces=Array.isArray(workspaceResult.workspaces)?workspaceResult.workspaces:[],workspaces=allWorkspaces.filter(item=>item.is_archived!==true),archivedWorkspaces=allWorkspaces.filter(item=>item.is_archived===true),currentWorkspace=workspaces.find(item=>item.id===workspace)||{id:workspace,name:workspace,kind:'company',is_demo:false};
   const folders=Array.isArray(folderResult.folders)?folderResult.folders:[],enabledFolders=folders.filter(folder=>folder.enabled===true);
-  state.sourceConfig={...s,workspaces,intakeFolders:folders,currentWorkspace};
+  state.sourceConfig={...s,workspaces,archivedWorkspaces,intakeFolders:folders,currentWorkspace};
   const bankReady=bank.configuration_state==='server_credentials_configured'&&bank.connector_implemented===true&&!bank.connection_store_error;
   const gmailReady=gmail.credentials_available===true&&gmail.secure_token_storage!=='unavailable';
   let bankReadiness=`Plaid ${escapeHtml(bank.environment||'server')} environment is ready. PayProof never asks for or receives your bank password.`;
@@ -179,7 +253,7 @@ async function sourcesDrawer(message='',tone='success'){
     ${noticeHtml(message,tone)}
     <div class="settings-intro"><p>Connect records, review every preview, and manage only <b>${escapeHtml(currentWorkspace.name)}</b>. Credentials and provider tokens stay server-side.</p><button id="refreshSources" class="button ghost">Refresh status</button></div>
     <div id="sourceAction" class="source-action" aria-live="polite"></div>
-    ${companyManagerHtml(workspaces,currentWorkspace)}
+    ${companyManagerHtml(workspaces,currentWorkspace,archivedWorkspaces)}
     <section class="settings-section" aria-labelledby="bankSettingsTitle">
       <div class="settings-heading"><div><span class="section-label">BANK RECORDS</span><h3 id="bankSettingsTitle">Bank connections</h3></div><span class="status-chip ${bankReady?'good':'warn'}">${bankReady?'ready':'not configured'}</span></div>
       <p>${bankReadiness}</p>
@@ -223,11 +297,18 @@ async function sourcesDrawer(message='',tone='success'){
 }
 function bindSourceActions(){
   $('#refreshSources').onclick=()=>sourcesDrawer('Connection status refreshed.','info').catch(error=>setSourceAction(apiErrorHtml(error)));
+  const profileLogo=$('#companyProfileLogo'),profileInitials=$('#companyProfileInitials');
+  if(profileLogo){const showLogo=visible=>{profileLogo.hidden=!visible;if(profileInitials)profileInitials.hidden=visible};profileLogo.onload=()=>showLogo(true);profileLogo.onerror=()=>{showLogo(false);profileLogo.removeAttribute('src')};if(profileLogo.complete)showLogo(profileLogo.naturalWidth>0)}
   const settingsWorkspace=$('#settingsWorkspaceSelect'),switchWorkspaceButton=$('#switchSettingsWorkspace');
   settingsWorkspace.onchange=()=>{switchWorkspaceButton.disabled=settingsWorkspace.value===state.workspace};
   switchWorkspaceButton.onclick=()=>switchWorkspace(settingsWorkspace.value,settingsWorkspace.selectedOptions[0]?.textContent||settingsWorkspace.value,true);
   const createCompanyForm=$('#createCompanyForm');if(createCompanyForm)createCompanyForm.onsubmit=createCompany;
   const renameCompanyForm=$('#renameCompanyForm');if(renameCompanyForm)renameCompanyForm.onsubmit=renameCompany;
+  const uploadCompanyLogoButton=$('#uploadCompanyLogo');if(uploadCompanyLogoButton)uploadCompanyLogoButton.onclick=uploadCompanyLogo;
+  const removeCompanyLogoButton=$('#removeCompanyLogo');if(removeCompanyLogoButton)removeCompanyLogoButton.onclick=previewCompanyLogoRemoval;
+  const transferCompanyButton=$('#transferCompanyRecords');if(transferCompanyButton)transferCompanyButton.onclick=previewCompanyTransfer;
+  const archiveCompanyButton=$('#archiveCompany');if(archiveCompanyButton)archiveCompanyButton.onclick=previewCompanyArchive;
+  $$('.restore-company').forEach(button=>button.onclick=()=>previewCompanyRestore(button.dataset.workspaceId));
   const connectBank=$('#connectBank');if(connectBank&&!connectBank.disabled)connectBank.onclick=startPlaidConnect;
   $$('.bank-sync').forEach(button=>button.onclick=()=>syncBankConnection(button.dataset.bankId,button));
   $$('.bank-disconnect').forEach(button=>button.onclick=()=>previewBankDisconnect(button.dataset.bankId));
@@ -271,6 +352,8 @@ async function switchWorkspace(workspaceId,label=workspaceId,reopenSources=false
   }
   const previousWorkspace=state.workspace,transition=++state.workspaceGeneration;
   cancelActivePlaid();
+  if(state.voice.recognition||state.voice.micState!=='off')cancelVoiceCapture('Microphone stopped when the active company changed.');
+  window.speechSynthesis?.cancel?.();
   state.sourceGeneration+=1;
   state.workspace=nextWorkspace;
   state.sourceConfig=null;
@@ -300,12 +383,14 @@ async function switchWorkspace(workspaceId,label=workspaceId,reopenSources=false
 }
 async function createCompany(event){
   event.preventDefault();
-  const form=event.currentTarget,submit=form.querySelector('[type="submit"]'),originWorkspace=state.workspace;
-  const name=String(new FormData(form).get('name')||'').trim();
+  const form=event.currentTarget,submit=form.querySelector('[type="submit"]'),originWorkspace=state.workspace,data=new FormData(form);
+  const name=String(data.get('name')||'').trim(),websiteInput=String(data.get('website')||'').trim(),website=safeWebsiteUrl(websiteInput);
   if(name.length<2){setSourceAction(noticeHtml('Enter a company name with at least 2 characters.','error'));return}
+  if(websiteInput&&!website){setSourceAction(noticeHtml('Enter a valid company website using http:// or https://.','error'));return}
   submit.disabled=true;setSourceAction(noticeHtml(`Creating ${name} as a separate company...`,'info'));
   try{
-    const result=await api('/api/workspaces',jsonRequest('POST',{name}));
+    const payload={name};if(website)payload.website=website;
+    const result=await api('/api/workspaces',jsonRequest('POST',payload));
     const company=result.workspace||result.company||result;
     if(!company?.id)throw new Error('The server created the company but did not return its identifier.');
     if(state.workspace!==originWorkspace){toast(`${company.name||name} was created. Select it from the company menu when ready.`);return}
@@ -315,21 +400,124 @@ async function createCompany(event){
 }
 async function renameCompany(event){
   event.preventDefault();
-  const form=event.currentTarget,submit=form.querySelector('[type="submit"]'),workspace=state.workspace;
+  const form=event.currentTarget,submit=form.querySelector('[type="submit"]'),workspace=state.workspace,data=new FormData(form);
   const current=state.sourceConfig?.currentWorkspace;
-  if(!current||current.kind!=='company'||current.is_demo===true){setSourceAction(noticeHtml('Built-in demo workspaces cannot be renamed.','warning'));return}
-  const name=String(new FormData(form).get('name')||'').trim();
+  if(!current||current.kind!=='company'||current.is_demo===true){setSourceAction(noticeHtml('Built-in demo workspace profiles cannot be changed.','warning'));return}
+  const name=String(data.get('name')||'').trim(),websiteInput=String(data.get('website')||'').trim(),website=safeWebsiteUrl(websiteInput);
   if(name.length<2){setSourceAction(noticeHtml('Enter a company name with at least 2 characters.','error'));return}
-  if(name===current.name){setSourceAction(noticeHtml('Enter a different company name before saving.','warning'));return}
-  submit.disabled=true;setSourceAction(noticeHtml('Renaming this company...','info'));
+  if(websiteInput&&!website){setSourceAction(noticeHtml('Enter a valid company website using http:// or https://.','error'));return}
+  const changes={},currentWebsite=safeWebsiteUrl(current.website)||'';
+  if(name!==current.name)changes.name=name;
+  if((website||'')!==currentWebsite)changes.website=website||'';
+  if(!Object.keys(changes).length){setSourceAction(noticeHtml('Change the company name or website before saving.','warning'));return}
+  submit.disabled=true;setSourceAction(noticeHtml('Saving this company profile...','info'));
   try{
-    const result=await api(`/api/workspaces/${encodeURIComponent(workspace)}`,jsonRequest('PATCH',{name}));
-    if(state.workspace!==workspace){toast(`${result.name||name} was renamed.`);return}
+    const result=await api(`/api/workspaces/${encodeURIComponent(workspace)}`,jsonRequest('PATCH',changes));
+    if(state.workspace!==workspace){toast(`${result.name||name} profile was updated.`);return}
     await loadData();
     if(state.workspace!==workspace)return;
-    await sourcesDrawer(`Company renamed to ${result.name||name}. Its connected sources and imported records stayed attached.`,'success');
-  }catch(error){if(state.workspace===workspace)setSourceAction(apiErrorHtml(error));else toast(`Company rename failed: ${error.message}`)}
+    await sourcesDrawer(`Updated the ${result.name||name} profile. Its connected sources and imported records stayed attached.`,'success');
+  }catch(error){if(state.workspace===workspace)setSourceAction(apiErrorHtml(error));else toast(`Company profile update failed: ${error.message}`)}
   finally{if(submit.isConnected)submit.disabled=false}
+}
+async function uploadCompanyLogo(event){
+  const button=event.currentTarget,input=$('#companyLogoFile'),file=input?.files?.[0],workspace=state.workspace,current=state.sourceConfig?.currentWorkspace;
+  if(!current||current.kind!=='company'||current.is_demo===true){setSourceAction(noticeHtml('Only a custom company can upload a logo.','warning'));return}
+  if(!file){setSourceAction(noticeHtml('Choose a PNG, JPEG, or WebP logo first.','warning'));return}
+  const allowed=new Set(['image/png','image/jpeg','image/webp']);
+  if(file.type&&!allowed.has(file.type.toLowerCase())){setSourceAction(noticeHtml('Logo files must be PNG, JPEG, or WebP.','error'));return}
+  if(file.size>2*1024*1024){setSourceAction(noticeHtml('Company logos must be 2 MB or smaller.','error'));return}
+  button.disabled=true;setSourceAction(noticeHtml('Uploading this logo to the active company profile...','info'));
+  const form=new FormData();form.append('logo',file,file.name);
+  try{
+    await api(`/api/workspaces/${encodeURIComponent(workspace)}/logo`,{method:'POST',body:form});
+    if(state.workspace!==workspace){toast(`The logo was updated for ${current.name}.`);return}
+    await loadData();
+    if(state.workspace!==workspace)return;
+    await sourcesDrawer(`Updated the ${current.name} logo. Only this company uses it.`,'success');
+  }catch(error){if(state.workspace===workspace)setSourceAction(apiErrorHtml(error));else toast(`Logo upload failed: ${error.message}`)}
+  finally{if(button.isConnected)button.disabled=false}
+}
+function previewCompanyLogoRemoval(){
+  const workspace=state.workspace,current=state.sourceConfig?.currentWorkspace;
+  if(!current||current.kind!=='company'||current.is_demo===true){setSourceAction(noticeHtml('Only a custom company logo can be removed.','warning'));return}
+  if(!current.logo_url){setSourceAction(noticeHtml('This company does not have a stored logo.','info'));return}
+  setSourceAction(`<div class="confirmation-card"><span class="section-label">REMOVE COMPANY LOGO</span><h3>${escapeHtml(current.name)}</h3><div class="notice warning">Confirming removes only PayProof's stored logo for this company. The company, its website, connected sources, and imported records are unchanged.</div><div class="modal-actions"><button id="confirmCompanyLogoRemoval" class="button danger">Confirm logo removal</button><button id="cancelSourceAction" class="button ghost">Cancel</button></div></div>`);
+  $('#cancelSourceAction').onclick=()=>setSourceAction('');
+  $('#confirmCompanyLogoRemoval').onclick=async event=>{
+    event.currentTarget.disabled=true;
+    try{
+      const result=await api(`/api/workspaces/${encodeURIComponent(workspace)}/logo`,jsonRequest('DELETE',{confirm:true}));
+      if(state.workspace!==workspace){toast(`The logo was removed from ${current.name}.`);return}
+      await loadData();
+      if(state.workspace!==workspace)return;
+      const message=result.logo_removed?`Removed the ${current.name} logo. Its company data and sources were unchanged.`:`${current.name} no longer has a stored logo.`;
+      await sourcesDrawer(message,result.file_cleanup_pending?'warning':'success');
+    }catch(error){if(state.workspace===workspace)setSourceAction(apiErrorHtml(error));else toast(`Logo removal failed: ${error.message}`)}
+  };
+}
+function previewCompanyTransfer(){
+  const workspace=state.workspace,current=state.sourceConfig?.currentWorkspace;
+  if(!current||current.kind!=='company'||current.is_demo===true){setSourceAction(noticeHtml('Transfer packages are available only for a custom company.','warning'));return}
+  setSourceAction(`<div class="confirmation-card"><span class="section-label">TRANSFER FINANCIAL RECORDS</span><h3>${escapeHtml(current.name)}</h3><div class="notice info"><b>This creates a portable ZIP that can be opened without PayProof.</b> It includes browser-readable HTML, Excel-safe CSV, structured JSON, and a SHA-256 manifest so the recipient can verify the files.</div><div class="notice warning">Credentials, access tokens, connector configuration, and raw intake files are excluded. A buyer or successor must reconnect their own bank and email accounts.</div><label id="transferCompanyNameLabel">Type <strong>${escapeHtml(current.name)}</strong> exactly to confirm<input id="transferCompanyNameConfirm" autocomplete="off" spellcheck="false"></label><div class="modal-actions"><button id="confirmCompanyTransfer" class="button primary" disabled>Download transfer package</button><button id="cancelSourceAction" class="button ghost">Cancel</button></div></div>`);
+  const confirmationName=$('#transferCompanyNameConfirm'),confirmButton=$('#confirmCompanyTransfer');
+  confirmationName.oninput=()=>{confirmButton.disabled=confirmationName.value!==current.name};
+  $('#cancelSourceAction').onclick=()=>setSourceAction('');
+  confirmButton.onclick=async event=>{
+    if(confirmationName.value!==current.name){confirmationName.focus();return}
+    event.currentTarget.disabled=true;
+    setSourceAction(noticeHtml(`Building the transfer package for ${current.name}...`,'info'));
+    try{
+      const response=await fetch(`/api/workspaces/${encodeURIComponent(workspace)}/transfer-package`,jsonRequest('POST',{confirm:true,company_name:current.name}));
+      if(!response.ok){
+        let payload={};
+        try{payload=await response.json()}catch{}
+        const error=new Error(payload.error||payload.errors?.join(', ')||`Transfer package failed (${response.status}).`);error.payload=payload;error.status=response.status;throw error;
+      }
+      const blob=await response.blob();
+      if(!blob.size)throw new Error('The server returned an empty transfer package.');
+      const fallback=`${current.name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'company'}-payproof-transfer.zip`;
+      const filename=safeTransferFilename(response.headers.get('Content-Disposition'),fallback),objectUrl=URL.createObjectURL(blob),anchor=document.createElement('a');
+      try{
+        anchor.href=objectUrl;anchor.download=filename;anchor.hidden=true;document.body.append(anchor);anchor.click();anchor.remove();
+      }finally{window.setTimeout(()=>URL.revokeObjectURL(objectUrl),1000)}
+      if(state.workspace===workspace)setSourceAction(noticeHtml(`Downloaded ${filename}. The recipient can inspect the HTML and CSV without PayProof and verify every exported file with the SHA-256 manifest.`,'success'));
+      else toast(`${current.name} transfer package downloaded.`);
+    }catch(error){if(state.workspace===workspace)setSourceAction(apiErrorHtml(error));else toast(`Transfer package failed: ${error.message}`)}
+  };
+}
+function previewCompanyArchive(){
+  const workspace=state.workspace,current=state.sourceConfig?.currentWorkspace;
+  if(!current||current.kind!=='company'||current.is_demo===true){setSourceAction(noticeHtml('Demo workspaces cannot be removed.','warning'));return}
+  setSourceAction(`<div class="confirmation-card"><span class="section-label">REMOVE COMPANY FROM ACTIVE USE</span><h3>${escapeHtml(current.name)}</h3><div class="notice warning"><b>This archives the company; it does not erase it.</b> All financial records, evidence, bank and Gmail connections, intake folders, logos, and audit history remain preserved and can be restored later.</div><label id="archiveCompanyNameLabel">Type <strong>${escapeHtml(current.name)}</strong> exactly to confirm<input id="archiveCompanyNameConfirm" autocomplete="off" spellcheck="false"></label><div class="modal-actions"><button id="confirmCompanyArchive" class="button danger" disabled>Remove company</button><button id="cancelSourceAction" class="button ghost">Cancel</button></div></div>`);
+  const confirmationName=$('#archiveCompanyNameConfirm'),confirmButton=$('#confirmCompanyArchive');
+  confirmationName.oninput=()=>{confirmButton.disabled=confirmationName.value!==current.name};
+  $('#cancelSourceAction').onclick=()=>setSourceAction('');
+  confirmButton.onclick=async event=>{
+    if(confirmationName.value!==current.name){confirmationName.focus();return}
+    event.currentTarget.disabled=true;
+    try{
+      const result=await api(`/api/workspaces/${encodeURIComponent(workspace)}`,jsonRequest('DELETE',{confirm:true,company_name:current.name}));
+      if(state.workspace!==workspace){toast(`${current.name} was removed from the active company list. Its records remain preserved.`);return}
+      const nextWorkspace=String(result.next_workspace||'business'),next=state.sourceConfig?.workspaces?.find(item=>item.id===nextWorkspace);
+      const preserved=result.records_preserved===true&&result.connections_preserved===true;
+      await switchWorkspace(nextWorkspace,next?.name||nextWorkspace,true,preserved?`${current.name} was removed from active use. All records and connections were preserved; restore it from Archived companies at any time.`:`${current.name} was archived, but the server returned an unexpected preservation status.`);
+    }catch(error){if(state.workspace===workspace)setSourceAction(apiErrorHtml(error));else toast(`Company removal failed: ${error.message}`)}
+  };
+}
+function previewCompanyRestore(workspaceId){
+  const originWorkspace=state.workspace,company=(state.sourceConfig?.archivedWorkspaces||[]).find(item=>String(item.id)===String(workspaceId));
+  if(!company){setSourceAction(noticeHtml('That archived company is no longer available. Refresh and try again.','warning'));return}
+  setSourceAction(`<div class="confirmation-card"><span class="section-label">RESTORE ARCHIVED COMPANY</span><h3>${escapeHtml(company.name)}</h3><div class="notice info">Restoring returns this company to the active selector with its preserved records, evidence, connections, intake folders, branding, and audit history.</div><div class="modal-actions"><button id="confirmCompanyRestore" class="button primary">Confirm restore</button><button id="cancelSourceAction" class="button ghost">Cancel</button></div></div>`);
+  $('#cancelSourceAction').onclick=()=>setSourceAction('');
+  $('#confirmCompanyRestore').onclick=async event=>{
+    event.currentTarget.disabled=true;
+    try{
+      const result=await api(`/api/workspaces/${encodeURIComponent(company.id)}/restore`,jsonRequest('POST',{confirm:true}));
+      if(state.workspace!==originWorkspace){toast(`${company.name} was restored to the active company list.`);return}
+      await sourcesDrawer(result.restored?`${company.name} was restored with all preserved records and connections.`:`${company.name} is already active.`,'success');
+    }catch(error){if(state.workspace===originWorkspace)setSourceAction(apiErrorHtml(error));else toast(`Company restore failed: ${error.message}`)}
+  };
 }
 function configuredIntakeFolder(folderId){
   return (state.sourceConfig?.intakeFolders||[]).find(folder=>String(folder.id)===String(folderId));
@@ -641,8 +829,141 @@ async function saveIntakeCorrection(event,expense,original){
 }
 async function uploadImport(commit){const file=$('#importFile')?.files[0];if(!file){toast('Choose a CSV file first');return}const form=new FormData();form.append('file',file);form.append('workspace',state.workspace);form.append('commit',String(commit));try{const r=await api('/api/import/transactions',{method:'POST',body:form});$('#importResult').innerHTML=`<div class="notice">${r.accepted.length} accepted · ${r.rejected.length} rejected</div>${r.rejected.map(x=>`<p>Line ${x.line}: ${escapeHtml(x.reason)}</p>`).join('')}<div class="detail-grid">${r.accepted.slice(0,8).map(x=>`<div class="detail-row"><span>${x.id}</span><strong>${escapeHtml(x.merchant)} · ${money(x.amount_cents,x.currency)}</strong></div>`).join('')}</div>${!r.committed&&r.accepted.length&&!r.rejected.length?'<button id="commitImport" class="button primary">Confirm import</button>':''}`;const commitBtn=$('#commitImport');if(commitBtn)commitBtn.onclick=()=>uploadImport(true);if(r.committed){toast('Import completed');await loadData()}}catch(e){$('#importResult').innerHTML=`<div class="notice">${escapeHtml(e.message)}</div>`}}
 
+function isEligibleBrowserReplyVoice(voice){
+  const label=`${voice?.name||''} ${voice?.voiceURI||''}`;
+  const preferred=/\b(Aria|Jenny|Ava|Emma|Sonia|Natasha|Libby|Michelle)\b/i;
+  return preferred.test(label)&&/(natural|neural|online)/i.test(label)&&voice?.localService!==true&&!/(offline|robot|robotic|espeak|festival)/i.test(label);
+}
+function eligibleBrowserReplyVoice(){
+  if(!window.speechSynthesis||typeof window.speechSynthesis.getVoices!=='function')return null;
+  const preference=['aria','jenny','ava','emma','sonia','natasha','libby','michelle'];
+  const eligible=window.speechSynthesis.getVoices().filter(isEligibleBrowserReplyVoice).sort((left,right)=>preference.findIndex(name=>String(left.name||'').toLowerCase().includes(name))-preference.findIndex(name=>String(right.name||'').toLowerCase().includes(name)));
+  const language=String(navigator.language||'').split('-')[0].toLowerCase();
+  return eligible.find(voice=>String(voice.lang||'').toLowerCase().startsWith(language))||eligible[0]||null;
+}
+function renderVoiceControls(message){
+  if(typeof message==='string')state.voice.statusMessage=message;
+  else if(message===null)state.voice.statusMessage='';
+  const mic=$('#micToggle'),spoken=$('#spokenRepliesToggle'),status=$('#voiceStatus');
+  if(!mic||!spoken||!status)return;
+  const micLabels={off:'◉ Mic off',listening:'● Listening',processing:'… Processing'};
+  mic.textContent=micLabels[state.voice.micState]||micLabels.off;
+  mic.disabled=!state.voice.inputAvailable||state.voice.micState==='processing';
+  mic.setAttribute('aria-pressed',String(state.voice.micState==='listening'));
+  mic.classList.toggle('listening',state.voice.micState==='listening');
+  mic.classList.toggle('processing',state.voice.micState==='processing');
+  const replyAvailable=Boolean(state.voice.replyVoice&&window.speechSynthesis&&typeof window.SpeechSynthesisUtterance==='function');
+  if(!replyAvailable)state.voice.spokenReplies=false;
+  spoken.disabled=!replyAvailable;
+  spoken.textContent=state.voice.spokenReplies?'♫ Spoken replies on':'♩ Spoken replies off';
+  spoken.setAttribute('aria-pressed',String(state.voice.spokenReplies));
+  spoken.classList.toggle('enabled',state.voice.spokenReplies);
+  let defaultStatus='Voice controls are off and start only when clicked.';
+  if(!state.voice.inputAvailable)defaultStatus='Microphone input is unavailable in this browser.';
+  else if(state.voice.micState==='listening')defaultStatus='Listening now. Speak once; click again to cancel.';
+  else if(state.voice.micState==='processing')defaultStatus='Processing the captured transcript.';
+  else if(state.voice.spokenReplies&&state.voice.replyVoice)defaultStatus=`Mic off · spoken replies use browser voice ${state.voice.replyVoice.name}.`;
+  else if(state.voice.replyVoice)defaultStatus='Mic off · an eligible browser voice is available; spoken replies remain off.';
+  else defaultStatus='Mic off · no Natural, Neural, or Online browser voice is available, so replies stay text-only.';
+  status.textContent=state.voice.statusMessage||defaultStatus;
+}
+function refreshEligibleReplyVoice(){
+  state.voice.replyVoice=eligibleBrowserReplyVoice();
+  if(!state.voice.replyVoice&&state.voice.spokenReplies){state.voice.spokenReplies=false;window.speechSynthesis?.cancel?.()}
+  renderVoiceControls();
+}
+function speechRecognitionErrorMessage(code){
+  if(code==='not-allowed'||code==='service-not-allowed')return 'Microphone permission was not granted. Enable it in browser site settings, then click Mic off to try again.';
+  if(code==='audio-capture')return 'No working microphone was found by the browser.';
+  if(code==='no-speech')return 'No speech was detected. Nothing was submitted.';
+  if(code==='network')return 'The browser speech-recognition service could not be reached.';
+  return `Voice input stopped${code?`: ${code}`:'.'}`;
+}
+function cancelVoiceCapture(message='Microphone input canceled. Nothing was submitted.'){
+  const recognition=state.voice.recognition;
+  if(recognition){recognition._payproofCancelled=true;try{recognition.abort()}catch{}state.voice.recognition=null}
+  state.voice.micState='off';renderVoiceControls(message);
+}
+function toggleMicInput(){
+  if(state.voice.micState==='listening'){cancelVoiceCapture('Listening stopped. Nothing was submitted.');return}
+  if(!state.voice.inputAvailable){renderVoiceControls('Microphone input is unavailable in this browser.');return}
+  if($('#chatSend').disabled){renderVoiceControls('Wait for the current answer before starting microphone input.');return}
+  const Recognition=window.SpeechRecognition||window.webkitSpeechRecognition,recognition=new Recognition();
+  recognition.continuous=false;recognition.interimResults=true;recognition.maxAlternatives=1;recognition.lang=navigator.language||'en-US';
+  recognition._payproofTranscript='';recognition._payproofCancelled=false;recognition._payproofError=false;recognition._payproofSubmitted=false;
+  recognition.onstart=()=>{state.voice.micState='listening';renderVoiceControls('Listening now. Speak once; click again to cancel.')};
+  recognition.onresult=event=>{
+    let interim='',hasFinal=false;
+    for(let index=event.resultIndex;index<event.results.length;index+=1){const transcript=String(event.results[index][0]?.transcript||'').trim();if(event.results[index].isFinal){if(transcript)recognition._payproofTranscript+=`${transcript} `;hasFinal=true}else interim+=`${transcript} `}
+    const visible=`${recognition._payproofTranscript} ${interim}`.trim();if(visible)$('#chatInput').value=visible;
+    if(hasFinal){state.voice.micState='processing';renderVoiceControls('Processing the captured transcript.');try{recognition.stop()}catch{}}
+  };
+  recognition.onerror=event=>{if(recognition._payproofCancelled)return;recognition._payproofError=true;state.voice.micState='off';renderVoiceControls(speechRecognitionErrorMessage(event.error))};
+  recognition.onend=async()=>{
+    if(state.voice.recognition===recognition)state.voice.recognition=null;
+    if(recognition._payproofCancelled||recognition._payproofError||recognition._payproofSubmitted)return;
+    const transcript=String(recognition._payproofTranscript||'').trim();
+    if(!transcript){state.voice.micState='off';renderVoiceControls('No speech was captured. Nothing was submitted.');return}
+    recognition._payproofSubmitted=true;
+    $('#chatInput').value=transcript;state.voice.micState='processing';renderVoiceControls('Processing the captured transcript.');
+    await ask(transcript,{fromVoice:true});
+  };
+  state.voice.recognition=recognition;state.voice.micState='listening';renderVoiceControls('Requesting microphone access from your browser...');
+  try{recognition.start()}catch(error){state.voice.recognition=null;state.voice.micState='off';renderVoiceControls(`Microphone input could not start: ${error.message}`)}
+}
+function toggleSpokenReplies(){
+  if(!state.voice.replyVoice){renderVoiceControls('No eligible Natural, Neural, or Online browser voice is available. Replies remain text-only.');return}
+  state.voice.spokenReplies=!state.voice.spokenReplies;
+  if(!state.voice.spokenReplies)window.speechSynthesis.cancel();
+  renderVoiceControls(state.voice.spokenReplies?`Spoken replies enabled with browser voice ${state.voice.replyVoice.name}.`:'Spoken replies are off. Replies remain text-only.');
+}
+function speakAssistantReply(text){
+  const voice=state.voice.replyVoice;
+  if(!state.voice.spokenReplies||!isEligibleBrowserReplyVoice(voice)||!window.speechSynthesis||typeof window.SpeechSynthesisUtterance!=='function')return;
+  window.speechSynthesis.cancel();
+  const utterance=new window.SpeechSynthesisUtterance(String(text||'').slice(0,2000));utterance.voice=voice;utterance.lang=voice.lang||navigator.language||'en-US';utterance.rate=1;
+  utterance.onstart=()=>renderVoiceControls(`Speaking with browser voice ${voice.name}.`);
+  utterance.onend=()=>renderVoiceControls(null);
+  utterance.onerror=()=>renderVoiceControls('The browser could not play this reply. Spoken replies remain enabled for the next answer.');
+  window.speechSynthesis.speak(utterance);
+}
+function setupVoiceControls(){
+  state.voice.inputAvailable=Boolean(window.SpeechRecognition||window.webkitSpeechRecognition);
+  $('#micToggle').onclick=toggleMicInput;$('#spokenRepliesToggle').onclick=toggleSpokenReplies;
+  if(window.speechSynthesis&&!state.voice.voicesBound){state.voice.voicesBound=true;window.speechSynthesis.addEventListener?.('voiceschanged',refreshEligibleReplyVoice)}
+  refreshEligibleReplyVoice();renderVoiceControls(null);
+}
+
 function addMessage(role,text,evidence=[]){const el=document.createElement('div');el.className=`message ${role}-message`;el.innerHTML=`<span class="message-label">${role==='user'?'OPERATOR':'PAYPROOF'}</span>${escapeHtml(text)}${evidence.length?`<div class="evidence-links">Evidence: ${evidence.slice(0,6).map(e=>`<button>${escapeHtml(e)}</button>`).join(', ')}${evidence.length>6?` +${evidence.length-6} more`:''}</div>`:''}`;$('#chatLog').append(el);$('#chatLog').scrollTop=$('#chatLog').scrollHeight}
-async function ask(question){const q=(question||$('#chatInput').value).trim();if(!q)return;$('#chatInput').value='';addMessage('user',q);$('#chatSend').disabled=true;try{const r=await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,workspace:state.workspace,selected_id:state.selectedId,session_id:state.sessionId})});addMessage('assistant',r.answer,r.evidence_ids);state.lastContext=r.context;$('#traceStatus').textContent=`${r.model.state==='live_model'?'AI':'Fallback'} · Trace: ${r.trace.state}`;if(r.focus_ids?.length){state.selectedId=r.focus_ids[0];renderVisual()}}catch(e){addMessage('assistant',`I could not complete that request: ${e.message}`)}finally{$('#chatSend').disabled=false;$('#chatInput').focus()}}
+async function ask(question,options={}){
+  if(state.chatPending){
+    if(options.fromVoice&&state.voice.micState==='processing'){state.voice.micState='off';renderVoiceControls('Wait for the current answer, then press the microphone again.')}
+    return;
+  }
+  const q=String(question||$('#chatInput').value||'').trim();
+  if(!q)return;
+  if(!options.fromVoice&&state.voice.micState==='listening')cancelVoiceCapture('Microphone input canceled because a typed question was submitted.');
+  const workspace=state.workspace,generation=state.workspaceGeneration,selectedId=state.selectedId;
+  state.chatPending=true;$('#chatInput').value='';addMessage('user',q);$('#chatSend').disabled=true;
+  let reply='';
+  try{
+    const result=await api('/api/chat',jsonRequest('POST',{question:q,workspace,selected_id:selectedId,session_id:state.sessionId}));
+    if(state.workspace!==workspace||generation!==state.workspaceGeneration){toast(`An answer finished for ${workspace}, but it was not shown because the active company changed.`);return}
+    reply=String(result.answer||'');
+    addMessage('assistant',reply,result.evidence_ids);
+    state.lastContext=result.context;
+    $('#traceStatus').textContent=`${result.model.state==='live_model'?'AI':'Fallback'} · Trace: ${result.trace.state}`;
+    if(result.focus_ids?.length){state.selectedId=result.focus_ids[0];renderVisual()}
+  }catch(error){
+    if(state.workspace===workspace&&generation===state.workspaceGeneration)addMessage('assistant',`I could not complete that request: ${error.message}`);
+    else toast(`A request for ${workspace} ended after the active company changed.`);
+  }finally{
+    state.chatPending=false;$('#chatSend').disabled=false;
+    if(options.fromVoice&&state.voice.micState==='processing'){state.voice.micState='off';renderVoiceControls(null)}
+    $('#chatInput').focus();
+  }
+  if(reply&&state.workspace===workspace&&generation===state.workspaceGeneration)speakAssistantReply(reply);
+}
 async function takeAction(action){const reason=action==='dismissed'?prompt('Reason for dismissal:')||'':'';try{const r=await api('/api/actions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:state.workspace,finding_id:state.selectedFinding,action,reason})});toast(`Simulated action recorded: ${r.status}`);await loadData()}catch(e){toast(e.message)}}
 function openDrawer(label,title,html){$('#drawerLabel').textContent=label;$('#drawerTitle').textContent=title;$('#drawerContent').innerHTML=html;$('#drawer').classList.remove('hidden');$('#drawerBackdrop').classList.remove('hidden')}
 function closeDrawer(){$('#drawer').classList.add('hidden');$('#drawerBackdrop').classList.add('hidden')}
@@ -662,5 +983,6 @@ $('#zoomIn').onclick=()=>{state.zoom=Math.min(2,state.zoom+.15);drawAtlas()};$('
 $('#atlasCanvas').onclick=e=>{const box=e.currentTarget.getBoundingClientRect(),x=(e.clientX-box.left-state.pan.x)/state.zoom,y=(e.clientY-box.top-state.pan.y)/state.zoom;let hit=null,best=999;state.nodes.forEach(n=>{const d=Math.hypot(n.x-x,n.y-y);if(d<Math.max(18,n.size+8)&&d<best){hit=n;best=d}});if(hit){state.selectedId=hit.id;$('#selectionCard').style.display='block';$('#selectionCard').innerHTML=`<b>${escapeHtml(hit.label)}</b><small>${hit.type.toUpperCase()} · ${escapeHtml(hit.source||'loaded evidence')} · click details or ask a question</small>`;if(['vendor','invoice','transaction','receipt','email'].includes(hit.type))openRecord(hit.id);drawAtlas()}};
 let rotateStart=null;$('#atlasCanvas').onpointerdown=e=>{rotateStart={x:e.clientX,yaw:state.yaw};e.currentTarget.setPointerCapture(e.pointerId)};$('#atlasCanvas').onpointermove=e=>{if(!rotateStart)return;state.yaw=rotateStart.yaw+(e.clientX-rotateStart.x)/240;drawAtlas()};$('#atlasCanvas').onpointerup=()=>{rotateStart=null};
 window.addEventListener('resize',()=>state.view==='atlas'&&drawAtlas());
+setupVoiceControls();
 addMessage('assistant','I am ready. Ask me to complete the security questionnaire, investigate a control, explain conflicting evidence, identify what is unknown, or show the source behind any answer.');
 loadData().catch(e=>addMessage('assistant',`The application could not load: ${e.message}`));
