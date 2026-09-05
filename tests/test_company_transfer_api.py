@@ -174,6 +174,12 @@ class CompanyTransferApiTests(unittest.TestCase):
     def test_confirmation_exact_name_and_custom_company_are_required_without_audit(self) -> None:
         company = self._create_company("Exact Transfer Name")
         url = f"/api/workspaces/{company['id']}/transfer-package"
+        for raw_body, content_type in ((b"[]", "application/json"), (b"null", "application/json"), (b"", None)):
+            with self.subTest(raw_body=raw_body):
+                response = self.client.post(url, data=raw_body, content_type=content_type)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("JSON object", response.get_json()["error"])
+                self.assertEqual(self._export_count(company["id"]), 0)
         invalid_payloads = (
             {},
             {"confirm": False, "company_name": company["name"]},

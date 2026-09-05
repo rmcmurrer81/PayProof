@@ -168,7 +168,9 @@ def workspace_restore(workspace_id: str):
 
 @app.post("/api/workspaces/<workspace_id>/transfer-package")
 def workspace_transfer_package(workspace_id: str):
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "A JSON object is required"}), 400
     try:
         archive, filename = create_company_transfer_package(
             workspace_id,

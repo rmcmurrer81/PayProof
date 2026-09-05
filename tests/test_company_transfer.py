@@ -215,6 +215,27 @@ class CompanyTransferTests(unittest.TestCase):
         transaction_csv = files["csv/transactions.csv"].decode("utf-8-sig")
         self.assertIn("'=HYPERLINK", transaction_csv)
 
+    def test_authorization_headers_are_redacted_without_leaving_tokens(self) -> None:
+        bearer = "bearer-token-that-must-never-export"
+        basic = "QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
+        self._insert("email_evidence", {
+            "id": "email-auth", "workspace_id": "company-acme", "provider": "gmail",
+            "sender": "security@example.test", "subject": "Connector debug output",
+            "snippet": (
+                f"Authorization: Bearer {bearer}\n"
+                f'"proxy_authorization": "Basic {basic}"'
+            ),
+            "source_label": "Gmail", "is_synthetic": 0,
+            "content_hash": "auth-header-hash", "imported_at": FIXED_TIME,
+        })
+        self.db.commit()
+
+        _, files = self._archive()
+        combined = b"\n".join(files.values()).decode("utf-8", errors="replace")
+        self.assertNotIn(bearer, combined)
+        self.assertNotIn(basic, combined)
+        self.assertGreaterEqual(combined.count("[REDACTED_CREDENTIAL]"), 2)
+
     def test_fixed_timestamp_produces_deterministic_zip_bytes(self) -> None:
         first = build_company_transfer_zip(self.db, "company-acme", generated_at=FIXED_TIME)
         second = build_company_transfer_zip(self.db, "company-acme", generated_at=FIXED_TIME)

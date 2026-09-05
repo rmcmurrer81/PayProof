@@ -111,7 +111,13 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
     r"authorization|secret|token)\b[\"']?)(\s*[:=]\s*)"
     r"(\"[^\"]*\"|'[^']*'|[^\s,;\"']+)"
 )
-_BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
+_AUTHORIZATION_VALUE = re.compile(
+    r"(?i)([\"']?\b(?:proxy[_ -]?)?authorization\b[\"']?\s*[:=]\s*)"
+    r"(\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\r\n,;]+)"
+)
+_AUTH_SCHEME_TOKEN = re.compile(
+    r"(?i)\b(?:Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}"
+)
 _TOKEN_SHAPES = re.compile(
     r"(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|access-(?:sandbox|development|production)-"
     r"[A-Za-z0-9_-]{6,}|AIza[A-Za-z0-9_-]{20,})\b"
@@ -162,6 +168,22 @@ def _redact_text(value: str) -> tuple[str, int]:
     )
     redactions += private_key_count
 
+    def authorization(match: re.Match[str]) -> str:
+        nonlocal redactions
+        redactions += 1
+        return f"{match.group(1)}[REDACTED_CREDENTIAL]"
+
+    # Authorization headers need to be consumed as a unit before the generic
+    # assignment matcher.  Otherwise ``Authorization: Bearer token`` would
+    # redact only ``Bearer`` and leave the actual token behind.
+    value = _AUTHORIZATION_VALUE.sub(authorization, value)
+    for pattern, replacement in (
+        (_AUTH_SCHEME_TOKEN, "[REDACTED_CREDENTIAL]"),
+        (_TOKEN_SHAPES, "[REDACTED_CREDENTIAL]"),
+    ):
+        value, count = pattern.subn(replacement, value)
+        redactions += count
+
     def assignment(match: re.Match[str]) -> str:
         nonlocal redactions
         redactions += 1
@@ -175,12 +197,6 @@ def _redact_text(value: str) -> tuple[str, int]:
         return f"{match.group(1)}{match.group(2)}{replacement}"
 
     value = _CREDENTIAL_ASSIGNMENT.sub(assignment, value)
-    for pattern, replacement in (
-        (_BEARER_TOKEN, "Bearer [REDACTED_CREDENTIAL]"),
-        (_TOKEN_SHAPES, "[REDACTED_CREDENTIAL]"),
-    ):
-        value, count = pattern.subn(replacement, value)
-        redactions += count
     return value, redactions
 
 
