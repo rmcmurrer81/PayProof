@@ -1,4 +1,4 @@
-const state={data:null,workspace:'business',view:new URLSearchParams(location.search).get('view')||'atlas',selectedId:'invoice:INV-1007',selectedFinding:'F-ROUTE-001',zoom:1,pan:{x:0,y:0},yaw:-.32,nodes:[],sessionId:`payproof-${Date.now()}`,lastContext:null,demoStep:0,sourceConfig:null,bankPreview:null,activePlaidHandler:null,oauthPoll:null,loadGeneration:0,sourceGeneration:0,workspaceGeneration:0,chatPending:false,refreshInProgress:false,lastUpdatedAt:null,lastRefreshSummary:'',networkProblem:false,refreshAfterReconnect:false,metricValuesByWorkspace:{},autoRefreshMinutes:readAutoRefreshMinutes(),nextAutoRefreshAt:null,autoRefreshTimer:null,autoRefreshRunning:false,readinessFilter:null,changeCurrencyByWorkspace:{},outsideResearchQueryByWorkspace:{},outsideResearchResultsByWorkspace:{},voice:{recognition:null,inputAvailable:false,micState:'off',spokenReplies:false,replyVoice:null,statusMessage:'',voicesBound:false}};
+const state={data:null,workspace:'business',view:new URLSearchParams(location.search).get('view')||'overview',selectedId:'invoice:INV-1007',selectedFinding:'F-ROUTE-001',zoom:1,pan:{x:0,y:0},yaw:-.32,nodes:[],sessionId:(()=>{try{const saved=sessionStorage.getItem('payproof-chat-session');if(saved)return saved;const created=`payproof-${crypto.randomUUID?.()||Date.now()}`;sessionStorage.setItem('payproof-chat-session',created);return created}catch{return `payproof-${Date.now()}`}})(),lastContext:null,demoStep:0,sourceConfig:null,connectionStatus:null,bankPreview:null,activePlaidHandler:null,oauthPoll:null,loadGeneration:0,sourceGeneration:0,workspaceGeneration:0,chatPending:false,refreshInProgress:false,lastUpdatedAt:null,lastRefreshSummary:'',networkProblem:false,refreshAfterReconnect:false,metricValuesByWorkspace:{},autoRefreshMinutes:readAutoRefreshMinutes(),nextAutoRefreshAt:null,autoRefreshTimer:null,autoRefreshRunning:false,readinessFilter:null,changeCurrencyByWorkspace:{},outsideResearchQueryByWorkspace:{},outsideResearchResultsByWorkspace:{},recordFilter:null,assistantSpotlight:null,voice:{recognition:null,inputAvailable:false,micState:'off',spokenReplies:false,replyVoice:null,statusMessage:'',voicesBound:false}};
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const riskColor={clear:'#3cf0a5',review:'#ffc64d',high:'#ff5274'};
 const money=(cents,currency='USD')=>new Intl.NumberFormat('en-US',{style:'currency',currency}).format(cents/100);
@@ -33,7 +33,10 @@ function safeResearchUrl(value){
   if(!/^https?:\/\//i.test(raw))return null;
   try{
     const url=new URL(raw);
-    if(!['http:','https:'].includes(url.protocol)||url.username||url.password)return null;
+    const host=url.hostname.replace(/^\[|\]$/g,'').toLowerCase();
+    const localName=!host.includes('.')||host==='localhost'||/\.(?:localhost|local|internal|lan|home|corp|test|invalid|onion)$/.test(host);
+    const localIp=/^(?:127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(host)||host==='::1';
+    if(!['http:','https:'].includes(url.protocol)||url.username||url.password||localName||localIp)return null;
     return url.href;
   }catch{return null}
 }
@@ -132,8 +135,8 @@ function renderActiveCompanyBranding(){
     logo.src=logoUrl;
   }
   const website=$('#activeCompanyWebsite');
-  website.hidden=!websiteUrl;website.removeAttribute('href');website.textContent='';
-  if(websiteUrl){const parsed=new URL(websiteUrl);website.href=websiteUrl;website.textContent=parsed.hostname.replace(/^www\./i,'')}
+  website.hidden=!websiteUrl;website.textContent='';
+  if(websiteUrl){const parsed=new URL(websiteUrl);website.textContent=parsed.hostname.replace(/^www\./i,'')}
   const typePill=$('#workspaceTypePill');
   typePill.textContent=workspace.is_demo?'SYNTHETIC EXAMPLE':'CUSTOM COMPANY';
   typePill.className=`pill ${workspace.is_demo?'cyan':'good'}`;
@@ -171,12 +174,14 @@ async function loadData(activity='Refreshing…'){
   setRefreshStatus(typeof activity==='string'?activity:'Refreshing…','refreshing');
   if(refreshButton){refreshButton.disabled=true;refreshButton.classList.add('refreshing')}
   try{
-    const data=await api(`/api/dashboard?workspace=${encodeURIComponent(workspace)}`);
+    const [data,sourceConfig]=await Promise.all([
+      api(`/api/dashboard?workspace=${encodeURIComponent(workspace)}`),
+      api(`/api/sources?workspace=${encodeURIComponent(workspace)}`).catch(()=>null),
+    ]);
     if(workspace!==state.workspace||generation!==state.loadGeneration)return false;
-    state.data=data;
-    if(state.workspace==='business'&&state.data.security?.graph?.nodes?.length)state.data.graph=state.data.security.graph;
+    state.data=data;state.connectionStatus=sourceConfig;if(sourceConfig)state.sourceConfig=sourceConfig;
     addOutsideResearchToGraph(state.data);
-    renderWorkspaceOptions();renderActiveCompanyBranding();renderMetrics();renderFindings();renderFocus();renderVisual();renderPrism();syncNav();
+    renderWorkspaceOptions();renderCompanyQuickList();renderActiveCompanyBranding();renderConnectionStatus();renderMetrics();renderFindings();renderFocus();renderVisual();renderPrism();syncNav();
     if(state.lastRefreshSummary==='refresh needs attention')state.lastRefreshSummary='';
     state.lastUpdatedAt=Date.now();scheduleNextAutoRefresh();updateElapsedLabel();
     return true;
@@ -196,7 +201,7 @@ async function runAutoRefresh(force=false){
   if(!navigator.onLine){
     markNetworkProblem();if(autoRefreshBlocked()){scheduleNextAutoRefresh(30000);return}
     const workspace=state.workspace;state.autoRefreshRunning=true;
-    try{await api('/api/sources/intake/scan',jsonRequest('POST',{workspace}));if(workspace===state.workspace){state.lastRefreshSummary='local folders refreshed · online sources paused';await loadData('Refreshing local folder records…');setRefreshStatus('Offline · local folders refreshed; bank and Gmail are paused','error')}}catch{setRefreshStatus('Offline · online sources paused; local folder refresh needs attention','error')}finally{state.autoRefreshRunning=false;scheduleNextAutoRefresh()}
+    try{const intake=await api('/api/sources/intake/scan',jsonRequest('POST',{workspace}));const intakeErrors=Array.isArray(intake.errors)?intake.errors.length:0;if(intakeErrors)throw new Error(`${intakeErrors} intake folder error${intakeErrors===1?'':'s'}`);if(workspace===state.workspace){state.lastRefreshSummary='local folders refreshed · online sources paused';await loadData('Refreshing local folder records…');setRefreshStatus('Offline · local folders refreshed; bank and Gmail are paused','error')}}catch{setRefreshStatus('Offline · online sources paused; local folder refresh needs attention','error')}finally{state.autoRefreshRunning=false;scheduleNextAutoRefresh()}
     return;
   }
   if(autoRefreshBlocked()){if(force)state.refreshAfterReconnect=true;if(state.autoRefreshMinutes)scheduleNextAutoRefresh(30000);setRefreshStatus('Auto refresh is waiting while you finish this task','waiting');return}
@@ -209,7 +214,7 @@ async function runAutoRefresh(force=false){
     tasks.push({label:'Intake scan',run:()=>api('/api/sources/intake/scan',jsonRequest('POST',{workspace}))});
     const settled=await Promise.allSettled(tasks.map(task=>task.run()));
     if(workspace!==state.workspace)return;
-    const succeeded=settled.filter(result=>result.status==='fulfilled').length,failed=settled.length-succeeded;
+    const succeeded=settled.filter(result=>result.status==='fulfilled'&&!(Array.isArray(result.value?.errors)&&result.value.errors.length)).length,failed=settled.length-succeeded;
     state.lastRefreshSummary=`${succeeded} source${succeeded===1?'':'s'} refreshed${failed?` · ${failed} need attention`:''}`;
     state.refreshInProgress=false;await loadData('Updating the dashboard…');state.refreshAfterReconnect=false;
   }catch(error){
@@ -226,46 +231,117 @@ function setupConnectivity(){
   window.addEventListener('offline',markNetworkProblem);
   window.addEventListener('online',()=>{markConnectionRestored();if(autoRefreshBlocked())state.refreshAfterReconnect=true;else runAutoRefresh(true)});
 }
-function renderWorkspaceOptions(){const el=$('#workspaceSelect'),fragment=document.createDocumentFragment();(state.data?.workspaces||[]).forEach(workspace=>{const option=document.createElement('option');option.value=workspace.id;option.textContent=workspace.name;fragment.append(option)});el.replaceChildren(fragment);el.value=state.workspace}
-function metricButtonHtml(label,value,note,tone,action,changed=false){return `<button type="button" class="metric ${tone} ${changed?'value-changed':''}" data-metric-action="${action}" aria-label="${escapeHtml(label)}: ${escapeHtml(value)}. Open ${action==='people'?'people and spending':action==='records'?'evidence':'readiness'}"><span>${escapeHtml(label.toUpperCase())}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(note)}</small><i aria-hidden="true">Open →</i></button>`}
+function renderWorkspaceOptions(){const el=$('#workspaceSelect');if(!el)return;const fragment=document.createDocumentFragment();(state.data?.workspaces||[]).forEach(workspace=>{const option=document.createElement('option');option.value=workspace.id;option.textContent=workspace.name;fragment.append(option)});el.replaceChildren(fragment);el.value=state.workspace}
+function renderCompanyQuickList(){
+  const target=$('#companyQuickList');if(!target)return;
+  target.innerHTML=(state.data?.workspaces||[]).map(workspace=>`<button class="company-quick-item ${workspace.id===state.workspace?'active':''}" data-company-id="${escapeHtml(workspace.id)}"><span class="company-mini-logo">${escapeHtml(workspaceInitials(workspace.name))}</span><span><b>${escapeHtml(workspace.name)}</b><small>${workspace.is_demo?'Demo company':'Company workspace'}</small></span><i>${workspace.id===state.workspace?'Active':'Open'}</i></button>`).join('');
+  $$('#companyQuickList [data-company-id]').forEach(button=>button.onclick=()=>{closeCompanyMenu();switchWorkspace(button.dataset.companyId,button.querySelector('b')?.textContent||button.dataset.companyId)});
+}
+function setConnectionButton(id,label,connected,detail){const button=$(id);if(!button)return;button.classList.toggle('connected',connected);button.classList.toggle('attention',!connected);button.querySelector('span').textContent=label;button.querySelector('b').textContent=detail;}
+function renderConnectionStatus(){
+  const sources=state.connectionStatus||{},bankConnections=Array.isArray(sources.bank?.connections)?sources.bank.connections:[],connectedBanks=bankConnections.filter(item=>item.state==='connected').length;
+  setConnectionButton('#bankHeaderStatus','Bank',connectedBanks>0,connectedBanks?`${connectedBanks} connected`:'Add bank');
+  setConnectionButton('#emailHeaderStatus','Email',Boolean(sources.gmail?.connected),sources.gmail?.connected?'Connected':'Add email');
+  const folders=Array.isArray(sources.intake_folder?.folders)?sources.intake_folder.folders.filter(item=>item.enabled!==false):[];
+  setConnectionButton('#intakeHeaderStatus','Intake',folders.length>0,folders.length?`${folders.length} folder${folders.length===1?'':'s'}`:'Add folder');
+}
+function metricButtonHtml(label,value,note,tone,action,changed=false){return `<button type="button" class="metric ${tone} ${changed?'value-changed':''}" data-metric-action="${action}" aria-label="${escapeHtml(label)}: ${escapeHtml(value)}"><span>${escapeHtml(label.toUpperCase())}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(note)}</small><i aria-hidden="true">View →</i></button>`}
 function bindMetricActions(){$$('[data-metric-action]').forEach(button=>button.onclick=()=>activateMetric(button.dataset.metricAction))}
 function renderMetricItems(items){
   const previous=state.metricValuesByWorkspace[state.workspace]||{},next={};
   $('#metrics').innerHTML=items.map(item=>{const [label,value]=item,key=label.toLowerCase().replaceAll(' ','_');next[key]=String(value);return metricButtonHtml(...item,previous[key]!==undefined&&previous[key]!==String(value))}).join('');
   state.metricValuesByWorkspace[state.workspace]=next;
 }
+function budgetSnapshot(){
+  const budgets=Array.isArray(state.data?.employee_budgets)?state.data.employee_budgets:[],expenses=Array.isArray(state.data?.expenses)?state.data.expenses:[];
+  const period=budgets.map(item=>String(item.period||'')).sort().at(-1)||null,current=budgets.filter(item=>item.period===period),employees=state.data?.employees||[];
+  const rows=current.map(budget=>{const employee=employees.find(item=>String(item.id)===String(budget.employee_id))||{id:budget.employee_id,name:'Employee'};const reports=expenses.filter(item=>String(item.employee_id)===String(budget.employee_id)&&String(item.spent_on||'').startsWith(period)&&String(item.currency||'').toUpperCase()===String(budget.currency||'').toUpperCase());const spent=reports.reduce((sum,item)=>sum+safeCount(item.amount_cents),0),limit=safeCount(budget.budget_cents),percent=limit?Math.round(spent/limit*100):0,status=spent>limit?'over':spent<limit*.5?'low':'track';return {employee,budget,reports,spent,limit,percent,status}});
+  const currencies=[...new Set(rows.map(item=>item.budget.currency))],totalBudget=rows.reduce((sum,item)=>sum+item.limit,0),totalSpent=rows.reduce((sum,item)=>sum+item.spent,0),percent=currencies.length===1&&totalBudget?Math.round(totalSpent/totalBudget*100):null;
+  return {period,rows,totalBudget,totalSpent,percent,currency:currencies.length===1?currencies[0]:null,over:rows.filter(item=>item.status==='over').length,low:rows.filter(item=>item.status==='low').length};
+}
 function renderMetrics(){
-  if(state.workspace==='business'){
-    const s=state.data.security.metrics;
-    renderMetricItems([['Controls assessed',s.controls_assessed,'QUESTIONNAIRE CONTROLS','green','readiness'],['Control gaps',s.gaps,'OPERATING FAILURES','red','gaps'],['Needs review',s.needs_review,'INCOMPLETE OR UNKNOWN','amber','review'],['Evidence sources',s.evidence_sources,'CITED RECORDS','','records']]);
-  }else{
-    const m=state.data.metrics;
-    renderMetricItems([['Money in',m.cash_in_label,'RECORDED INCOME','green','readiness'],['Money out',m.cash_out_label,`${m.transaction_count} TRANSACTIONS`,'amber','readiness'],['Net cash',m.net_cash_label,'INCOME MINUS OUTFLOW','','readiness'],['Employee spend',m.employee_spend_label,`${state.data.expenses.length} REPORTS`,'red','people']]);
-  }
+  const m=state.data.metrics||{},budget=budgetSnapshot(),open=(state.data.findings||[]).filter(item=>['open','held','review'].includes(item.status)).length;
+  renderMetricItems([
+    ['Money in',m.cash_in_label||'No income','Recorded income','green','overview'],
+    ['Money out',m.cash_out_label||'No outflow',`${safeCount(m.transaction_count)} ledger records`,'amber','change'],
+    ['Budget used',budget.percent===null?'Not set':`${budget.percent}%`,budget.period?`${budget.over} over budget · ${budget.period}`:'Add employee budgets',budget.over?'red':'green','people'],
+    ['Needs review',String(open),open?'Open warning signals':'Nothing waiting',open?'red':'green','records'],
+  ]);
   bindMetricActions();
 }
-function activateMetric(action){
-  state.readinessFilter=action==='gaps'?'gap':action==='review'?'review':null;
-  state.view=action==='people'?'people':action==='records'?'records':'change';
-  if(state.workspace==='business'&&state.readinessFilter){
-    const controls=state.data.security?.controls||[],match=controls.find(control=>state.readinessFilter==='gap'?control.status==='gap':['partial','review'].includes(control.status));
-    if(match){state.selectedId=`control:${match.id}`;renderFocus()}
-  }
-  syncNav();renderVisual();
-}
-function renderFindings(){const rail=$('#findingRail');if(state.workspace==='business'){rail.innerHTML=state.data.security.controls.map(c=>`<button class="finding-mini ${c.status==='gap'?'high':''}" data-control="${c.id}"><i></i><span><b>${escapeHtml(c.name)}</b><small>${c.confidence}% confidence</small></span><strong>${c.status.toUpperCase()}</strong></button>`).join('');$$('[data-control]').forEach(b=>b.onclick=()=>selectControl(b.dataset.control));return}rail.innerHTML=state.data.findings.slice(0,4).map(f=>`<button class="finding-mini ${f.severity}" data-finding="${f.id}"><i></i><span><b>${f.title}</b><small>${f.entity_id}</small></span><strong>${f.severity.toUpperCase()}</strong></button>`).join('');$$('[data-finding]').forEach(b=>b.onclick=()=>selectFinding(b.dataset.finding))}
+function activateMetric(action){state.view=['overview','change','people','records','geo','atlas'].includes(action)?action:'overview';syncNav();renderVisual()}
+function renderFindings(){const rail=$('#findingRail'),findings=(state.data.findings||[]).filter(item=>['open','held','review'].includes(item.status)).slice(0,4);rail.innerHTML=findings.map(f=>`<button class="finding-mini ${f.severity==='high'?'high':''}" data-finding="${escapeHtml(f.id)}"><i></i><span><b>${escapeHtml(f.title)}</b><small>${escapeHtml(f.entity_id)} · ${escapeHtml(f.status)}</small></span><strong>${escapeHtml(f.severity.toUpperCase())}</strong></button>`).join('')||'<p class="empty-state">Nothing needs attention.</p>';$$('[data-finding]').forEach(b=>b.onclick=()=>selectFinding(b.dataset.finding))}
 function selectControl(id){const c=state.data.security.controls.find(x=>x.id===id);state.selectedId=`control:${id}`;$('#focusTitle').textContent=`${c.status.toUpperCase()} · ${c.name}`;$('#focusSummary').textContent=`${c.answer} ${c.contradiction}`;$('#comparison').innerHTML=`<div class="compare-value"><span>CONFIDENCE</span><strong>${c.confidence}%</strong></div><div class="compare-value new"><span>EVIDENCE</span><strong>${c.evidence.length}</strong></div>`;drawAtlas();openRecord(state.selectedId)}
-function selectFinding(id){state.selectedFinding=id;const f=state.data.findings.find(x=>x.id===id);if(f){state.selectedId=`invoice:${f.entity_id}`;if(f.entity_id.startsWith('TX-'))state.selectedId=`transaction:${f.entity_id}`;renderFocus();renderVisual();addMessage('assistant',`${f.title}: ${f.summary}`,[...f.evidence_ids])}}
-function renderFocus(){if(state.workspace==='business'&&state.data.security?.controls?.length){const c=state.data.security.controls.find(x=>`control:${x.id}`===state.selectedId)||state.data.security.controls.find(x=>x.status==='gap');state.selectedId=`control:${c.id}`;$('#focusTitle').textContent=`${c.status.toUpperCase()} · ${c.name}`;$('#focusSummary').textContent=`${c.answer} ${c.contradiction}`;$('#comparison').innerHTML=`<div class="compare-value"><span>CONFIDENCE</span><strong>${c.confidence}%</strong></div><div class="compare-value new"><span>EVIDENCE</span><strong>${c.evidence.length}</strong></div>`;return}const f=state.data.findings.find(x=>x.id===state.selectedFinding)||state.data.findings[0];if(!f){$('#focusTitle').textContent='No findings in this company yet';$('#focusSummary').textContent='Connect a bank, Gmail, or an intake folder to begin building evidence for this company.';$('#comparison').innerHTML='';return}$('#focusTitle').textContent=`${f.severity.toUpperCase()} · ${f.title}`;$('#focusSummary').textContent=`${f.summary} ${f.basis}`;$('#comparison').innerHTML=f.kind==='destination_change'?`<div class="compare-value"><span>VERIFIED</span><strong>****7284</strong></div><div class="compare-value new"><span>PROPOSED</span><strong>****9142</strong></div>`:`<div class="compare-value"><span>RULE BASIS</span><strong>${f.kind.replaceAll('_',' ')}</strong></div>`}
+function selectFinding(id){state.selectedFinding=id;const f=state.data.findings.find(x=>x.id===id);if(f){state.selectedId=findingRecordRef(f)||state.selectedId;state.view='records';syncNav();renderFocus();renderVisual();addMessage('assistant',`${f.title}: ${f.summary}`,[...f.evidence_ids])}}
+function renderFocus(){const selectedControl=state.selectedId?.startsWith('control:')?(state.data.security?.controls||[]).find(item=>`control:${item.id}`===state.selectedId):null;if(selectedControl){$('#focusTitle').textContent=`${selectedControl.status.toUpperCase()} · ${selectedControl.name}`;$('#focusSummary').textContent=`${selectedControl.answer} ${selectedControl.contradiction}`;$('#comparison').innerHTML=`<div class="compare-value"><span>CONFIDENCE</span><strong>${selectedControl.confidence}%</strong></div><div class="compare-value new"><span>EVIDENCE</span><strong>${selectedControl.evidence.length}</strong></div>`;return}const f=(state.data.findings||[]).find(x=>x.id===state.selectedFinding)||(state.data.findings||[])[0];if(!f){$('#focusTitle').textContent='Nothing selected';$('#focusSummary').textContent='Choose a dashboard card, employee, transaction, or review item to see more.';$('#comparison').innerHTML='';return}$('#focusTitle').textContent=`${f.severity.toUpperCase()} · ${f.title}`;$('#focusSummary').textContent=`${f.summary} ${f.basis}`;$('#comparison').innerHTML=f.kind==='destination_change'?`<div class="compare-value"><span>VERIFIED</span><strong>****7284</strong></div><div class="compare-value new"><span>PROPOSED</span><strong>****9142</strong></div>`:`<div class="compare-value"><span>STATUS</span><strong>${escapeHtml(f.status)}</strong></div><div class="compare-value"><span>SOURCES</span><strong>${(f.evidence_ids||[]).length}</strong></div>`}
 function renderPrism(){const p=state.data.prism,el=$('#prismPill');el.className=`pill ${p.state==='configured'?'good':'muted'}`;el.innerHTML=`<i></i> PRISM ${p.state==='configured'?'CONFIGURED':'NEEDS KEY'}${p.queued?` · ${p.queued} QUEUED`:''}`;const badge=$('.assistant-badges span');if(badge)badge.textContent=state.data.ai.state==='configured'?`LIVE MODEL · ${state.data.ai.model}`:'LOCAL FALLBACK'}
 
 function renderVisual(){
-  ['atlasCanvas','changeView','geoView','peopleView','recordsView'].forEach(id=>$(`#${id}`).classList.add('hidden'));
-  const security=state.workspace==='business',titles=security?{atlas:['Security assurance atlas','3D controls and evidence'],change:['Control readiness','Gaps and contradictions'],geo:['Evidence coverage','Systems and stakeholders'],people:['People & spending','Employee report review'],records:['Security evidence','Questionnaire source records']}:{atlas:['Money relationship atlas','Financial relationships'],change:['Explain the change','Period-over-period financial movement'],geo:['Financial geography','Office and vendor locations'],people:['People & spending','Employee report review'],records:['Evidence explorer','Loaded financial records']};
+  ['overviewView','atlasCanvas','changeView','geoView','peopleView','recordsView'].forEach(id=>$(`#${id}`).classList.add('hidden'));
+  const titles={overview:['Business dashboard','Money, budgets, connections, and risk'],atlas:['Evidence links','Optional record relationship view'],change:['Money & trends','Income and spending over time'],geo:['Connections','Banks, email, and intake folders'],people:['People & budgets','Employee spending against plan'],records:['Risk & documents','Review queue and saved records']};if(!titles[state.view])state.view='overview';
   $('#viewTitle').textContent=titles[state.view][0];$('#panelTitle').textContent=titles[state.view][1];
   $(`#${state.view==='atlas'?'atlasCanvas':state.view+'View'}`).classList.remove('hidden');
   $('.canvas-tools').classList.toggle('hidden',state.view!=='atlas');
-  if(state.view==='atlas')drawAtlas();if(state.view==='change')renderChange();if(state.view==='geo')renderGeo();if(state.view==='people')renderPeople();if(state.view==='records')renderRecords();
+  $('.command-center').classList.toggle('expanded-view',['overview','people','geo'].includes(state.view));$('#focusPanel').classList.toggle('hidden',['overview','people','geo'].includes(state.view));
+  const hints={overview:'Choose a card to see the records behind the number.',change:'Select a transaction or review signal for more detail.',people:'Choose an employee to review spending or update a budget.',records:'Open only the detail you need; evidence stays collapsed.',geo:'Manage each company connection from one place.',atlas:'This optional view shows how saved evidence relates.'};$('#visualHint').textContent=hints[state.view];
+  if(state.view==='overview')renderOverview();if(state.view==='atlas')drawAtlas();if(state.view==='change')renderChange();if(state.view==='geo')renderConnectionsView();if(state.view==='people')renderPeopleBudget();if(state.view==='records')renderRecordsModern();
+}
+function monthlyMoneySnapshot(){
+  const months={};(state.data.transactions||[]).forEach(item=>{const period=String(item.occurred_on||'').slice(0,7);if(!/^\d{4}-\d{2}$/.test(period)||String(item.currency||'USD').toUpperCase()!=='USD')return;const row=months[period]||(months[period]={income:0,out:0});if(item.kind==='income')row.income+=safeCount(item.amount_cents);else if(['payment','purchase','expense','debit'].includes(item.kind)&&safeCount(item.amount_cents)>0)row.out+=safeCount(item.amount_cents)});return Object.entries(months).sort(([left],[right])=>left.localeCompare(right)).slice(-6).map(([period,values])=>({period,...values}))
+}
+function renderOverview(){
+  const m=state.data.metrics||{},monthly=monthlyMoneySnapshot(),max=Math.max(1,...monthly.flatMap(item=>[item.income,item.out]));
+  const bars=monthly.map(item=>`<div class="money-month"><div class="money-columns"><i class="income" style="--height:${Math.max(5,Math.round(item.income/max*100))}%" title="${escapeHtml(safeMoney(item.income,'USD'))} in"></i><i class="out" style="--height:${Math.max(5,Math.round(item.out/max*100))}%" title="${escapeHtml(safeMoney(item.out,'USD'))} out"></i></div><span>${escapeHtml(item.period.slice(5))}</span></div>`).join('')||'<p class="empty-state">No monthly activity yet.</p>';
+  const latest=monthly.at(-1),prior=monthly.at(-2),change=latest&&prior&&prior.income?Math.round((latest.income-prior.income)/Math.abs(prior.income)*100):null,trend=change===null?'Need another month':change>0?`Up ${change}%`:change<0?`Down ${Math.abs(change)}%`:'No change';
+  const budget=budgetSnapshot(),budgetLabel=budget.currency?safeMoney(budget.totalSpent,budget.currency):'Not set',budgetLimit=budget.currency?safeMoney(budget.totalBudget,budget.currency):'Add budgets';
+  const findings=(state.data.findings||[]).filter(item=>['open','held','review'].includes(item.status)),riskRows=findings.slice(0,3).map(item=>`<button data-overview-finding="${escapeHtml(item.id)}"><i class="risk-dot ${item.severity==='high'?'high':'review'}"></i><span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.summary)}</small></span><strong>${escapeHtml(item.severity)}</strong></button>`).join('')||'<p class="empty-state">Nothing is waiting for review.</p>';
+  const bank=(state.connectionStatus?.bank?.connections||[]).filter(item=>item.state==='connected').length,email=Boolean(state.connectionStatus?.gmail?.connected),folders=(state.connectionStatus?.intake_folder?.folders||[]).filter(item=>item.enabled!==false).length;
+  const recent=[...(state.data.bank_transactions||[]).map(item=>({date:item.posted_on,id:`bank:${item.id}`,merchant:item.description,amount:item.amount_cents,currency:item.currency,direction:item.direction})),...(state.data.transactions||[]).map(item=>({date:item.occurred_on,id:`transaction:${item.id}`,merchant:item.merchant_raw,amount:item.amount_cents,currency:item.currency,direction:item.kind==='income'?'credit':'debit'}))].sort((a,b)=>String(b.date).localeCompare(String(a.date))).slice(0,4);
+  const recentRows=recent.map(item=>`<button data-overview-record="${escapeHtml(item.id)}"><span><b>${escapeHtml(item.merchant)}</b><small>${escapeHtml(item.date)} · ${escapeHtml(item.direction)}</small></span><strong class="${item.direction==='credit'?'positive':''}">${item.direction==='credit'?'+':'−'}${escapeHtml(safeMoney(Math.abs(item.amount),item.currency))}</strong></button>`).join('')||'<p class="empty-state">Connect a bank or import a statement.</p>';
+  $('#overviewView').innerHTML=`<div class="overview-grid">
+    <section class="overview-card cash-overview"><header><div><span class="section-label">CASH MOVEMENT</span><h4>Money in and out</h4></div><button data-overview-view="change">Explore trends →</button></header><div class="cash-summary"><div><span>Money in</span><b>${escapeHtml(m.cash_in_label||'No income')}</b></div><div><span>Money out</span><b>${escapeHtml(m.cash_out_label||'No outflow')}</b></div><div class="net"><span>Net cash</span><b>${escapeHtml(m.net_cash_label||'Unknown')}</b></div></div><div class="money-chart" aria-label="Six month income and outflow chart">${bars}</div><div class="chart-key"><span><i class="income"></i>Income</span><span><i class="out"></i>Outflow</span><b>Revenue ${escapeHtml(trend)}</b></div></section>
+    <section class="overview-card budget-overview"><header><div><span class="section-label">TEAM BUDGET</span><h4>${escapeHtml(budget.period||'No budget period')}</h4></div><button data-overview-view="people">People →</button></header><div class="budget-visual"><div class="budget-ring" style="--budget-percent:${Math.min(100,budget.percent||0)}"><span><b>${budget.percent===null?'—':`${budget.percent}%`}</b><small>used</small></span></div><div><b>${escapeHtml(budgetLabel)}</b><span>of ${escapeHtml(budgetLimit)}</span><small class="${budget.over?'danger-text':''}">${budget.over} over budget · ${budget.low} below 50% used</small></div></div><p>Low use is a signal to check timing, not automatically a success or problem.</p></section>
+    <section class="overview-card risk-overview"><header><div><span class="section-label">NEEDS ATTENTION</span><h4>${findings.length} review item${findings.length===1?'':'s'}</h4></div><button data-overview-view="records">Review all →</button></header><div class="risk-list">${riskRows}</div></section>
+    <section class="overview-card connection-overview"><header><div><span class="section-label">LIVE INPUTS</span><h4>Connected records</h4></div><button data-open-connections>Manage →</button></header><div class="connection-grid"><button data-open-connections class="${bank?'ready':'missing'}"><i></i><span><b>Bank</b><small>${bank?`${bank} connected`:'Ready to connect'}</small></span></button><button data-open-connections class="${email?'ready':'missing'}"><i></i><span><b>Email</b><small>${email?'Connected':'Ready to connect'}</small></span></button><button data-open-connections class="${folders?'ready':'missing'}"><i></i><span><b>Intake folders</b><small>${folders?`${folders} active`:'Add a folder'}</small></span></button></div><small class="refresh-note">Refreshes every ${state.autoRefreshMinutes} minutes. Online sources pause when offline.</small></section>
+    <section class="overview-card recent-overview"><header><div><span class="section-label">LATEST ACTIVITY</span><h4>Recent transactions</h4></div><button data-overview-view="change">See all →</button></header><div class="recent-list">${recentRows}</div></section>
+  </div>`;
+  $$('#overviewView [data-overview-view]').forEach(button=>button.onclick=()=>activateMetric(button.dataset.overviewView));$$('#overviewView [data-overview-finding]').forEach(button=>button.onclick=()=>selectFinding(button.dataset.overviewFinding));$$('#overviewView [data-overview-record]').forEach(button=>button.onclick=()=>openRecord(button.dataset.overviewRecord));$$('#overviewView [data-open-connections]').forEach(button=>button.onclick=()=>sourcesDrawer());
+}
+function renderConnectionsView(){
+  const sources=state.connectionStatus||{},banks=Array.isArray(sources.bank?.connections)?sources.bank.connections:[],gmail=sources.gmail||{},folders=Array.isArray(sources.intake_folder?.folders)?sources.intake_folder.folders:[],imports=Array.isArray(sources.imports)?sources.imports:[],tavily=sources.tavily||{};
+  const bankRows=banks.map(item=>`<div class="connection-detail"><span><b>${escapeHtml(item.institution||'Bank account')}</b><small>${escapeHtml((item.account_masks||[]).map(mask=>`ending ${mask}`).join(', ')||'Account details available after sync')}</small></span><i class="${item.state==='connected'?'ready':'missing'}">${escapeHtml(item.state||'unknown')}</i></div>`).join('')||'<p class="empty-state">No live bank is connected. The synthetic statement still demonstrates matching.</p>';
+  const folderRows=folders.map(item=>`<div class="connection-detail"><span><b>${escapeHtml(item.name||item.id||'Intake folder')}</b><small>${escapeHtml(item.path||'Folder path saved locally')}</small></span><i class="${item.enabled===false?'missing':'ready'}">${item.enabled===false?'paused':'active'}</i></div>`).join('')||'<p class="empty-state">No intake folder is configured.</p>';
+  $('#geoView').innerHTML=`<div class="connections-dashboard"><section class="connection-flow"><div class="flow-source"><span>🏦</span><b>Bank</b><small>Transactions</small></div><i>→</i><div class="flow-source"><span>✉</span><b>Email</b><small>Receipts &amp; invoices</small></div><i>→</i><div class="flow-source"><span>▣</span><b>Intake</b><small>Employee paperwork</small></div><i>→</i><div class="flow-core"><span>P</span><b>PayProof</b><small>Match · explain · review</small></div></section><div class="connection-card-grid">
+    <article class="connection-card"><header><span class="connection-icon">🏦</span><div><h4>Bank accounts</h4><p>${banks.filter(item=>item.state==='connected').length} connected to this company</p></div><button data-manage-connections>Manage</button></header><details open><summary>Show accounts</summary><div>${bankRows}</div></details></article>
+    <article class="connection-card"><header><span class="connection-icon">✉</span><div><h4>Email</h4><p>${gmail.connected?'Mailbox connected':'Ready to connect Gmail'}</p></div><button data-manage-connections>Manage</button></header><details open><summary>What PayProof reads</summary><p>Read-only purchase emails, invoice details, dates, amounts, and item descriptions for matching. Your login stays with Google.</p></details></article>
+    <article class="connection-card"><header><span class="connection-icon">▣</span><div><h4>Intake folders</h4><p>${folders.filter(item=>item.enabled!==false).length} active for this company</p></div><button data-manage-connections>Manage</button></header><details open><summary>Show folders</summary><div>${folderRows}</div></details></article>
+    <article class="connection-card"><header><span class="connection-icon">↥</span><div><h4>Imports &amp; research</h4><p>${imports.length} imported source${imports.length===1?'':'s'}</p></div><button data-manage-connections>Manage</button></header><details><summary>More details</summary><p>CSV, OFX/QFX, images, and optional outside research. Tavily is ${tavily.configured?'ready':'not configured'}; web results stay unverified until a person checks them.</p></details></article>
+  </div></div>`;
+  $$('#geoView [data-manage-connections]').forEach(button=>button.onclick=()=>sourcesDrawer());
+}
+function renderPeopleBudget(){
+  const employees=state.data.employees||[],snapshot=budgetSnapshot(),period=snapshot.period||(state.data.expenses||[]).map(item=>String(item.spent_on||'').slice(0,7)).sort().at(-1)||new Date().toISOString().slice(0,7);
+  const rows=employees.map(employee=>{const budgetRow=snapshot.rows.find(item=>String(item.employee.id)===String(employee.id));const reports=(state.data.expenses||[]).filter(item=>String(item.employee_id)===String(employee.id)&&String(item.spent_on||'').startsWith(period));const spent=budgetRow?budgetRow.spent:reports.reduce((sum,item)=>sum+safeCount(item.amount_cents),0),currency=budgetRow?.budget.currency||reports[0]?.currency||'USD',limit=budgetRow?.limit||0,percent=limit?Math.round(spent/limit*100):null,status=!limit?'unset':spent>limit?'over':spent<limit*.5?'low':'track';return {employee,reports,spent,currency,limit,percent,status}});
+  const cards=rows.map(item=>{const statusLabel={over:'Over budget',low:'Below 50% used',track:'Within budget',unset:'Budget not set'}[item.status],barWidth=item.percent===null?0:Math.min(100,item.percent);return `<article class="budget-person ${item.status}" data-employee-card="${escapeHtml(item.employee.id)}"><header><span class="person-avatar">${escapeHtml(workspaceInitials(item.employee.name))}</span><div><h4>${escapeHtml(item.employee.name)}</h4><p>${escapeHtml(item.employee.department||'Team')} · ${escapeHtml(item.employee.office||'Office not saved')}</p></div><span class="budget-status">${statusLabel}</span></header><div class="budget-amount"><div><span>Spent</span><b>${escapeHtml(safeMoney(item.spent,item.currency))}</b></div><div><span>Budget</span><b>${item.limit?escapeHtml(safeMoney(item.limit,item.currency)):'Not set'}</b></div><div><span>Reports</span><b>${item.reports.length}</b></div></div><div class="budget-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${item.percent||0}"><i style="width:${barWidth}%"></i></div><div class="budget-person-actions"><button data-person-record="${escapeHtml(item.employee.id)}">View spending</button><button data-edit-budget="${escapeHtml(item.employee.id)}">${item.limit?'Change':'Set'} budget</button></div></article>`}).join('');
+  $('#peopleView').innerHTML=`<div class="budget-dashboard"><section class="budget-summary"><div><span class="section-label">${escapeHtml(period)} TEAM PLAN</span><h4>${snapshot.percent===null?'Add team budgets':`${snapshot.percent}% of budget used`}</h4><p>See who may need help, who is over plan, and where planned work may not have happened yet.</p></div><div class="budget-summary-stats"><span><b>${snapshot.over}</b> over budget</span><span><b>${snapshot.low}</b> below 50% used</span><span><b>${employees.length}</b> employees</span></div></section><section class="budget-people-grid">${cards||'<p class="empty-state">No employees are loaded for this company.</p>'}</section></div>`;
+  $$('#peopleView [data-person-record]').forEach(button=>button.onclick=()=>openPersonDetails(button.dataset.personRecord));$$('#peopleView [data-edit-budget]').forEach(button=>button.onclick=event=>{event.stopPropagation();openBudgetEditor(button.dataset.editBudget,period)});
+  if(state.assistantSpotlight?.type==='employee'){const card=$(`[data-employee-card="${CSS.escape(state.assistantSpotlight.id)}"]`);card?.classList.add('assistant-highlight');card?.scrollIntoView({block:'nearest'});state.assistantSpotlight=null}
+}
+function openBudgetEditor(employeeId,period){
+  const employee=(state.data.employees||[]).find(item=>String(item.id)===String(employeeId));if(!employee)return;const current=(state.data.employee_budgets||[]).find(item=>String(item.employee_id)===String(employeeId)&&item.period===period);
+  openDrawer('PEOPLE & BUDGETS',`Budget for ${employee.name}`,`<div class="notice">Set a monthly spending plan for this company. PayProof records this change in the audit history.</div><form id="budgetForm" class="compact-form"><label>Month<input name="period" type="month" value="${escapeHtml(period)}" required></label><label>Budget amount<input name="amount" type="number" min="0.01" step="0.01" value="${current?(safeCount(current.budget_cents)/100).toFixed(2):''}" placeholder="1500.00" required></label><label>Currency<input name="currency" value="${escapeHtml(current?.currency||'USD')}" minlength="3" maxlength="3" required></label><button class="button primary" type="submit">Save budget</button></form>`);
+  $('#budgetForm').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.currentTarget);try{await api(`/api/employees/${encodeURIComponent(employeeId)}/budget`,jsonRequest('PUT',{workspace:state.workspace,period:form.get('period'),amount:form.get('amount'),currency:form.get('currency')}));closeDrawer();await loadData('Updating the budget…');state.view='people';renderVisual();toast(`Budget saved for ${employee.name}`)}catch(error){toast(error.message)}};
+}
+function renderRecordsModern(){
+  const filter=String(state.recordFilter||'').toLowerCase(),documents=state.data.documents||[],security=state.data.security||{controls:[],evidence:[]};
+  const allTransactions=[...(state.data.bank_transactions||[]).map(item=>({id:`bank:${item.id}`,date:item.posted_on,merchant:item.description,amount:item.amount_cents,currency:item.currency,type:'Bank',source:item.source_id})),...(state.data.transactions||[]).map(item=>({id:`transaction:${item.id}`,date:item.occurred_on,merchant:item.merchant_raw,amount:item.amount_cents,currency:item.currency,type:'Ledger',source:item.source_id}))].sort((a,b)=>String(b.date).localeCompare(String(a.date)));
+  const transactions=filter?allTransactions.filter(item=>`${item.merchant} ${item.id} ${item.source}`.toLowerCase().includes(filter)):allTransactions;
+  const filterBar=filter?`<div class="active-filter"><span>Showing records matching <b>${escapeHtml(filter)}</b></span><button data-clear-record-filter>Show everything</button></div>`:'';
+  const txRows=transactions.slice(0,40).map(item=>`<button class="record-list-row" data-record="${escapeHtml(item.id)}"><span><b>${escapeHtml(item.merchant)}</b><small>${escapeHtml(item.date)} · ${escapeHtml(item.type)} · ${escapeHtml(item.source)}</small></span><strong>${escapeHtml(safeMoney(item.amount,item.currency))}</strong></button>`).join('')||'<p class="empty-state">No matching transaction was found.</p>';
+  const documentRows=documents.map(item=>`<button class="document-list-row" data-record="document:${escapeHtml(item.id)}"><span class="doc-icon">▤</span><span><b>${escapeHtml(item.filename)}</b><small>${escapeHtml(String(item.document_type||'document').replaceAll('_',' '))} · ${escapeHtml(item.status||'saved')}</small></span><i>${item.is_synthetic?'Synthetic demo':'Company file'}</i></button>`).join('')||'<p class="empty-state">No intake documents are loaded.</p>';
+  const controls=(security.controls||[]).map(item=>`<button class="record-list-row" data-control="${escapeHtml(item.id)}"><span><b>${escapeHtml(item.name)}</b><small>${escapeHtml(item.answer)}</small></span><strong class="${item.status==='gap'?'danger-text':''}">${escapeHtml(item.status)}</strong></button>`).join('')||'<p class="empty-state">No security questionnaire is loaded.</p>';
+  $('#recordsView').innerHTML=`${filterBar}${reviewQueueHtml()}<div class="records-sections"><details open><summary><span><b>Transactions</b><small>${transactions.length} matching record${transactions.length===1?'':'s'}</small></span><i>Expand / collapse</i></summary><div class="record-list">${txRows}</div></details><details><summary><span><b>Intake paperwork</b><small>${documents.length} saved document${documents.length===1?'':'s'}</small></span><i>Expand / collapse</i></summary><div class="document-list">${documentRows}</div></details><details><summary><span><b>Security questionnaire</b><small>${security.metrics?.controls_assessed||0} controls assessed</small></span><i>Expand / collapse</i></summary><div class="record-list">${controls}</div></details>${outsideResearchRecordsHtml()}</div>`;
+  bindRecordActions();$$('#recordsView [data-control]').forEach(button=>button.onclick=()=>selectControl(button.dataset.control));const clear=$('#recordsView [data-clear-record-filter]');if(clear)clear.onclick=()=>{state.recordFilter=null;renderRecordsModern()};
 }
 function layoutNodes(width,height){
   const source=state.data.graph.nodes.map(n=>({...n})), center=source.find(n=>n.type==='workspace');center.x=width*.45;center.y=height*.5;
@@ -278,7 +354,7 @@ function drawAtlas(){requestAnimationFrame(()=>{const c=$('#atlasCanvas'),box=c.
   const t=Date.now()/800;state.data.graph.edges.forEach(e=>{const a=get(e.source),b=get(e.target);if(!a||!b)return;const active=e.risk==='high';ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.strokeStyle=active?'#ff5274':e.risk==='review'?'#ffc64d55':'#3ed8ff38';ctx.lineWidth=active?3:1+(Math.min(e.amount||0,5000000)/5000000)*2;ctx.shadowBlur=active?14:0;ctx.shadowColor=ctx.strokeStyle;ctx.stroke();if(active){const p=(t%1),x=a.x+(b.x-a.x)*p,y=a.y+(b.y-a.y)*p;ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill()}});ctx.shadowBlur=0;
   [...state.nodes].sort((a,b)=>(a.depth||0)-(b.depth||0)).forEach(n=>{const selected=n.id===state.selectedId, color=riskColor[n.risk]||'#3ed8ff',r=(n.size||9)*(n.depthScale||1);ctx.beginPath();ctx.arc(n.x,n.y,r+(selected?5:0),0,Math.PI*2);ctx.fillStyle='#061828';ctx.fill();ctx.lineWidth=selected?3:1.5;ctx.strokeStyle=selected?'#fff':color;ctx.shadowColor=color;ctx.shadowBlur=selected?22:10;ctx.stroke();ctx.shadowBlur=0;ctx.fillStyle=color;ctx.globalAlpha=.8;ctx.beginPath();ctx.arc(n.x,n.y,Math.max(3,r*.35),0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;ctx.fillStyle='#cdeeff';ctx.font=`${n.type==='workspace'?'bold 11':'9'}px Segoe UI`;ctx.textAlign='center';ctx.fillText(n.label,n.x,n.y+r+14)});ctx.restore()})}
 function renderChange(){
-  if(state.workspace==='business'){
+  if(state.view==='security-readiness'){
     const allControls=state.data.security.controls;
     const controls=state.readinessFilter==='gap'?allControls.filter(control=>control.status==='gap'):state.readinessFilter==='review'?allControls.filter(control=>['partial','review'].includes(control.status)):allControls;
     const filterLabel=state.readinessFilter==='gap'?'Control gaps':state.readinessFilter==='review'?'Needs review':'All controls';
@@ -640,6 +716,7 @@ function cancelActivePlaid(){
 function resetWorkspaceContext(workspace){
   state.selectedFinding=workspace==='business'?'F-ROUTE-001':null;
   state.selectedId=null;
+  state.view='overview';state.recordFilter=null;state.assistantSpotlight=null;
   state.lastContext=null;
   state.bankPreview=null;
   const selection=$('#selectionCard');if(selection){selection.style.display='none';selection.replaceChildren()}
@@ -1250,7 +1327,21 @@ function setupVoiceControls(){
   refreshEligibleReplyVoice();renderVoiceControls(null);
 }
 
-function addMessage(role,text,evidence=[]){const el=document.createElement('div');el.className=`message ${role}-message`;el.innerHTML=`<span class="message-label">${role==='user'?'OPERATOR':'PAYPROOF'}</span>${escapeHtml(text)}${evidence.length?`<div class="evidence-links">Evidence: ${evidence.slice(0,6).map(e=>`<button>${escapeHtml(e)}</button>`).join(', ')}${evidence.length>6?` +${evidence.length-6} more`:''}</div>`:''}`;$('#chatLog').append(el);$('#chatLog').scrollTop=$('#chatLog').scrollHeight}
+function evidenceRecordRef(sourceId){const value=String(sourceId||'');const data=state.data||{};if((data.security?.evidence||[]).some(item=>item.id===value))return `security:${value}`;for(const [rows,prefix] of [[data.bank_transactions,'bank'],[data.transactions,'transaction'],[data.invoices,'invoice'],[data.receipts,'receipt'],[data.emails,'email'],[data.expenses,'expense'],[data.documents,'document'],[data.web_evidence,'web']]){const row=(rows||[]).find(item=>item.id===value||item.source_id===value);if(row)return `${prefix}:${row.id}`}return null}
+function addMessage(role,text,evidence=[]){const el=document.createElement('div');el.className=`message ${role}-message`;const unique=[...new Set(evidence||[])],sources=unique.length?`<details class="message-sources"><summary>Sources (${unique.length})</summary><div>${unique.slice(0,12).map(source=>{const ref=evidenceRecordRef(source);return ref?`<button data-chat-record="${escapeHtml(ref)}">${escapeHtml(source)}</button>`:`<span>${escapeHtml(source)}</span>`}).join('')}${unique.length>12?`<span>+${unique.length-12} more</span>`:''}</div></details>`:'';el.innerHTML=`<span class="message-label">${role==='user'?'YOU':'PAYPROOF'}</span><p>${escapeHtml(text)}</p>${sources}`;$('#chatLog').append(el);$$('[data-chat-record]',el).forEach(button=>button.onclick=()=>openRecord(button.dataset.chatRecord));$('#chatLog').scrollTop=$('#chatLog').scrollHeight}
+function questionUsesSelectedContext(question){const text=String(question||'').toLowerCase().trim();return /^(why|how so|tell me more|what about (it|this|that))\b/.test(text)||anyPhrase(text,['this item','this record','this control','selected item','selected record','selected control','show its evidence','show the evidence','what was bought','what items','purchase details','open it'])}
+function anyPhrase(text,phrases){return phrases.some(phrase=>text.includes(phrase))}
+function merchantForFocus(focus){const [type,...parts]=String(focus||'').split(':'),id=parts.join(':');if(type==='vendor')return (state.data.vendors||[]).find(item=>String(item.id)===id)?.name||id;if(type==='transaction')return (state.data.transactions||[]).find(item=>String(item.id)===id)?.merchant_raw||id;if(type==='bank')return (state.data.bank_transactions||[]).find(item=>String(item.id)===id)?.description||id;return ''}
+function navigateFromAssistant(question,result){
+  const text=String(question||'').toLowerCase(),focus=String(result.focus_ids?.[0]||''),calculation=result.calculation||{};
+  const namedEmployee=(state.data.employees||[]).find(item=>text.includes(String(item.name||'').toLowerCase()));
+  if(namedEmployee||focus.startsWith('employee:')||Array.isArray(calculation.employees)){const id=namedEmployee?.id||focus.split(':').slice(1).join(':');state.view='people';if(id)state.assistantSpotlight={type:'employee',id};syncNav();renderVisual();return}
+  if(Number.isFinite(calculation.review_count)||anyPhrase(text,['needs review','need review','needs my attention','possible fraud','why was','why are these'])){state.view='records';state.recordFilter=null;syncNav();renderVisual();return}
+  if(calculation.revenue_by_currency||anyPhrase(text,['revenue','money in','money out','cash flow','spending trend'])){state.view='change';syncNav();renderVisual();return}
+  if(focus.startsWith('transaction:')||focus.startsWith('bank:')||focus.startsWith('vendor:')||anyPhrase(text,['transaction','amazon','purchase'])){state.recordFilter=text.includes('amazon')?'amazon':merchantForFocus(focus);state.view='records';syncNav();renderVisual();return}
+  if(focus.startsWith('control:')||anyPhrase(text,['mfa','backup','security','questionnaire','production access'])){state.view='records';syncNav();renderVisual();return}
+  if(anyPhrase(text,['bank account','email connection','intake folder','connect'])){state.view='geo';syncNav();renderVisual()}
+}
 async function ask(question,options={}){
   if(state.chatPending){
     if(options.fromVoice&&state.voice.micState==='processing'){state.voice.micState='off';renderVoiceControls('Wait for the current answer, then press the microphone again.')}
@@ -1259,17 +1350,18 @@ async function ask(question,options={}){
   const q=String(question||$('#chatInput').value||'').trim();
   if(!q)return;
   if(!options.fromVoice&&state.voice.micState==='listening')cancelVoiceCapture('Microphone input canceled because a typed question was submitted.');
-  const workspace=state.workspace,generation=state.workspaceGeneration,selectedId=state.selectedId;
+  const workspace=state.workspace,generation=state.workspaceGeneration,selectedId=questionUsesSelectedContext(q)?state.selectedId:null;
   state.chatPending=true;$('#chatInput').value='';addMessage('user',q);$('#chatSend').disabled=true;
   let reply='';
   try{
-    const result=await api('/api/chat',jsonRequest('POST',{question:q,workspace,selected_id:selectedId,session_id:state.sessionId}));
+    const payload={question:q,workspace,session_id:state.sessionId};if(selectedId)payload.selected_id=selectedId;
+    const result=await api('/api/chat',jsonRequest('POST',payload));
     if(state.workspace!==workspace||generation!==state.workspaceGeneration){toast(`An answer finished for ${workspace}, but it was not shown because the active company changed.`);return}
     reply=String(result.answer||'');
     addMessage('assistant',reply,result.evidence_ids);
     state.lastContext=result.context;
     $('#traceStatus').textContent=`${result.model.state==='live_model'?'AI':'Fallback'} · Trace: ${result.trace.state}`;
-    if(result.focus_ids?.length){state.selectedId=result.focus_ids[0];renderVisual()}
+    if(result.focus_ids?.length)state.selectedId=result.focus_ids[0];navigateFromAssistant(q,result);
   }catch(error){
     if(state.workspace===workspace&&generation===state.workspaceGeneration)addMessage('assistant',`I could not complete that request: ${error.message}`);
     else toast(`A request for ${workspace} ended after the active company changed.`);
@@ -1286,13 +1378,22 @@ function closeDrawer(){$('#drawer').classList.add('hidden');$('#drawerBackdrop')
 function toast(message){const t=document.createElement('div');t.className='toast';t.textContent=message;document.body.append(t);setTimeout(()=>t.remove(),2600)}
 function escapeHtml(value){return String(value??'').replace(/[&<>'"]/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[character]))}
 
-function startDemo(){const steps=[()=>{state.view='atlas';syncNav();renderVisual();state.selectedFinding='F-ROUTE-001';renderFocus();toast('Step 1 · Follow the red proposed payment route')},()=>ask('What changed on this invoice?'),()=>{state.view='change';syncNav();renderVisual();toast('Step 3 · Explain changes across periods')},()=>evidenceDrawer()];steps[state.demoStep%steps.length]();state.demoStep++;$('#tourButton').textContent=state.demoStep%steps.length?`Next demo step ${state.demoStep+1}/${steps.length}`:'▶ Guided demo'}
+function startDemo(){const steps=[()=>{state.view='overview';syncNav();renderVisual();toast('Step 1 · See money, budgets, sources, and risk together')},()=>ask('What needs my attention?'),()=>ask('Who is over budget?'),()=>ask('What was the last transaction?')];steps[state.demoStep%steps.length]();state.demoStep++;$('#tourButton').textContent=state.demoStep%steps.length?`Next ${state.demoStep+1}/${steps.length}`:'▶ Demo'}
 function syncNav(){$$('#viewNav button').forEach(b=>b.classList.toggle('active',b.dataset.view===state.view))}
+function openCompanyMenu(){const panel=$('#companyQuickPanel'),toggle=$('#companyMenuToggle');panel?.classList.remove('hidden');toggle?.setAttribute('aria-expanded','true')}
+function closeCompanyMenu(){const panel=$('#companyQuickPanel'),toggle=$('#companyMenuToggle');panel?.classList.add('hidden');toggle?.setAttribute('aria-expanded','false')}
+function setupCompanyMenu(){
+  $('#companyMenuToggle').onclick=()=>$('#companyQuickPanel').classList.contains('hidden')?openCompanyMenu():closeCompanyMenu();$('#companyMenuClose').onclick=closeCompanyMenu;
+  $('#quickManageCompany').onclick=()=>{closeCompanyMenu();sourcesDrawer().catch(error=>toast(error.message))};$('#quickAddCompany').onclick=async()=>{closeCompanyMenu();try{await sourcesDrawer();const form=$('#createCompanyForm');const details=form?.closest('details');if(details)details.open=true;form?.querySelector('input')?.focus();form?.scrollIntoView({block:'nearest'})}catch(error){toast(error.message)}};
+  document.addEventListener('pointerdown',event=>{if(!event.target.closest('.company-menu'))closeCompanyMenu()});document.addEventListener('keydown',event=>{if(event.key==='Escape')closeCompanyMenu()});
+}
+function applyTheme(theme){const selected=theme==='light'?'light':'dark';document.documentElement.dataset.theme=selected;const button=$('#themeToggle');if(button){button.textContent=selected==='light'?'☾':'☀';button.title=selected==='light'?'Use dark mode':'Use light mode';button.setAttribute('aria-label',button.title)}try{localStorage.setItem('payproof-theme',selected)}catch{}}
+function setupTheme(){let saved='dark';try{saved=localStorage.getItem('payproof-theme')||(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark')}catch{}applyTheme(saved);$('#themeToggle').onclick=()=>applyTheme(document.documentElement.dataset.theme==='light'?'dark':'light')}
 
 $('#workspaceSelect').onchange=event=>switchWorkspace(event.target.value,event.target.selectedOptions[0]?.textContent||event.target.value);
-$$('#viewNav button').forEach(b=>b.onclick=()=>{state.view=b.dataset.view;syncNav();renderVisual()});
+$$('#viewNav button').forEach(b=>b.onclick=()=>{state.view=b.dataset.view;if(state.view!=='records')state.recordFilter=null;syncNav();renderVisual()});
 $('#refreshButton').onclick=()=>loadData();$('#resetButton').onclick=async()=>{if(confirm('Reset only the built-in synthetic example?')){await api('/api/reset',{method:'POST'});state.selectedFinding='F-ROUTE-001';state.selectedId='invoice:INV-1007';await loadData();toast('Synthetic example reset')}};
-$('#importOpen').onclick=importDrawer;$('#sourcesOpen').onclick=()=>sourcesDrawer().catch(e=>toast(e.message));$('#tourButton').onclick=startDemo;$('#evidenceButton').onclick=evidenceDrawer;$('#contextOpen').onclick=contextDrawer;$('#chatContextButton').onclick=contextDrawer;
+$('#importOpen').onclick=importDrawer;$('#sourcesOpen').onclick=()=>sourcesDrawer().catch(e=>toast(e.message));['#bankHeaderStatus','#emailHeaderStatus','#intakeHeaderStatus'].forEach(selector=>$(selector).onclick=()=>sourcesDrawer().catch(error=>toast(error.message)));$('#tourButton').onclick=startDemo;$('#evidenceButton').onclick=evidenceDrawer;$('#contextOpen').onclick=contextDrawer;$('#chatContextButton').onclick=contextDrawer;
 $('#drawerClose').onclick=closeDrawer;$('#drawerBackdrop').onclick=closeDrawer;$('#chatSend').onclick=()=>ask();$('#chatInput').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();ask()}};
 $$('#suggestions button').forEach(b=>b.onclick=()=>ask(b.textContent));$$('[data-action]').forEach(b=>b.onclick=()=>takeAction(b.dataset.action));
 $('#zoomIn').onclick=()=>{state.zoom=Math.min(2,state.zoom+.15);drawAtlas()};$('#zoomOut').onclick=()=>{state.zoom=Math.max(.65,state.zoom-.15);drawAtlas()};$('#zoomReset').onclick=()=>{state.zoom=1;state.pan={x:0,y:0};drawAtlas()};
@@ -1302,5 +1403,7 @@ window.addEventListener('resize',()=>state.view==='atlas'&&drawAtlas());
 setupVoiceControls();
 setupAutoRefresh();
 setupConnectivity();
-addMessage('assistant','I am ready. Ask me to complete the security questionnaire, investigate a control, explain conflicting evidence, identify what is unknown, or show the source behind any answer.');
+setupCompanyMenu();
+setupTheme();
+addMessage('assistant','Hi. Ask me what came in or went out, what needs attention, who is over budget, or why a record was flagged. I will show the matching screen and the sources behind my answer.');
 loadData().catch(e=>addMessage('assistant',`The application could not load: ${e.message}`));

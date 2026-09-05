@@ -38,6 +38,7 @@ from src.core import (
     get_company_logo_path,
     get_record,
     get_reconciliation_summary,
+    import_web_evidence,
     import_transactions_csv,
     import_gmail_metadata,
     import_ocr_receipt,
@@ -63,9 +64,11 @@ from src.core import (
     scan_intake_folder,
     save_company_logo,
     send_prism_trace,
+    set_employee_budget,
     sync_plaid_transactions,
     update_intake_folder,
     update_company_workspace,
+    utc_now,
     preview_bank_statement,
 )
 
@@ -96,6 +99,20 @@ GMAIL_DISCONNECT_PREVIEWS: dict[str, dict] = {}
 GMAIL_CREDENTIAL_LOCK = threading.RLock()
 GMAIL_STATE_TTL_SECONDS = 10 * 60
 GMAIL_PREVIEW_TTL_SECONDS = 10 * 60
+TAVILY_SEARCH_URL = "https://api.tavily.com/search"
+TAVILY_TIMEOUT_SECONDS = 8
+TAVILY_MAX_RESPONSE_BYTES = 512 * 1024
+WEB_IMPORT_MAX_REQUEST_BYTES = 128 * 1024
+WEB_SEARCH_MAX_REQUEST_BYTES = 16 * 1024
+WEB_IMPORT_MAX_ITEMS = 10
+WEB_QUERY_MAX_CHARS = 500
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep the server credential on the one fixed Tavily origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 @app.get("/")
@@ -331,6 +348,40 @@ def _require_session_id(value) -> str:
     return value.strip()
 
 
+def _require_web_query(value, *, required: bool) -> str:
+    if value is None and not required:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("query must be text")
+    query = value.strip()
+    if (required and not query) or len(query) > WEB_QUERY_MAX_CHARS:
+        qualifier = "between 1 and" if required else "no more than"
+        raise ValueError(f"query must be {qualifier} {WEB_QUERY_MAX_CHARS} characters")
+    if any(ord(character) < 32 or ord(character) == 127 for character in query):
+        raise ValueError("query contains unsupported control characters")
+    return query
+
+
+def _tavily_api_key() -> str | None:
+    key = os.getenv("TAVILY_API_KEY", "").strip()
+    if not key or len(key) > 4096 or "\r" in key or "\n" in key:
+        return None
+    return key
+
+
+def _tavily_status() -> dict:
+    configured = _tavily_api_key() is not None
+    return {
+        "id": "tavily",
+        "provider": "Tavily",
+        "configured": configured,
+        "state": "ready" if configured else "not_configured",
+        "mode": "public web search imported as unverified evidence",
+        "api_key_exposed_to_browser": False,
+        "search_endpoint": "/api/sources/tavily/search",
+    }
+
+
 def _gmail_paths(workspace_id: str = "business"):
     workspace_id = _require_workspace(workspace_id)
     standard_credentials = PROJECT_ROOT / "credentials.json"
@@ -446,21 +497,161 @@ def sources():
         return jsonify({"error": str(exc)}), 400
     bank = bank_connector_status(workspace)
     gmail = _gmail_status(workspace)
+    tavily = _tavily_status()
     intake_folders = list_intake_folders(workspace)
     return jsonify({
         "gmail": gmail,
+        "tavily": tavily,
         "imports": list_import_sources(workspace), "csv": {"available": True},
         "bank": bank,
         "connections": [gmail, {"id": "bank", **bank,
                                   "capabilities": ["add_local_statement", "remove_local_statement", "view_reconciliation",
                                                    "create_link_token", "exchange_public_token", "sync", "disconnect"]}],
         "capabilities": {"source_removal_requires_preview": True, "source_removal_requires_confirmation": True,
-                         "add_bank": "/api/import/bank/preview", "add_email": "/api/sources/gmail/connect"},
+                         "add_bank": "/api/import/bank/preview", "add_email": "/api/sources/gmail/connect",
+                         "search_web": tavily["search_endpoint"],
+                         "import_web_snapshot": "/api/sources/web/import"},
         "intake_folder": {"available": True, "mode": "local JSON paperwork",
                           "path": str(PROJECT_ROOT / "intake"), "folders": intake_folders,
                           "editable": True, "edit_mode": "audited_correction", "originals_preserved": True,
                           "editable_fields": ["merchant", "amount", "currency", "date", "category", "purpose", "receipt_status", "approval_status"]},
     })
+
+
+@app.post("/api/sources/web/import")
+def web_snapshot_import():
+    if request.content_length is not None and request.content_length > WEB_IMPORT_MAX_REQUEST_BYTES:
+        return jsonify({"error": "Web snapshot request is too large"}), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "A JSON object is required"}), 400
+    try:
+        workspace = _require_workspace(payload.get("workspace"), "business")
+        query = _require_web_query(payload.get("query"), required=False)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    items = payload.get("items")
+    if (not isinstance(items, list) or not 1 <= len(items) <= WEB_IMPORT_MAX_ITEMS
+            or not all(isinstance(item, dict) for item in items)):
+        return jsonify({"error": f"items must contain 1 to {WEB_IMPORT_MAX_ITEMS} web result objects"}), 400
+    try:
+        result = import_web_evidence(
+            items,
+            workspace,
+            source_label="User-supplied web snapshot · unverified",
+            query=query,
+            retrieved_at=utc_now(),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        return jsonify({"error": "Web snapshots could not be saved"}), 500
+    return jsonify(result)
+
+
+@app.put("/api/employees/<path:employee_id>/budget")
+def employee_budget_update(employee_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "A JSON object is required"}), 400
+    try:
+        return jsonify(set_employee_budget(
+            _require_workspace(payload.get("workspace"), "business"),
+            employee_id,
+            payload.get("amount"),
+            payload.get("currency", "USD"),
+            payload.get("period"),
+        ))
+    except (ValueError, ArithmeticError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/sources/tavily/search")
+def tavily_search():
+    if request.content_length is not None and request.content_length > WEB_SEARCH_MAX_REQUEST_BYTES:
+        return jsonify({"error": "Search request is too large"}), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "A JSON object is required"}), 400
+    try:
+        workspace = _require_workspace(payload.get("workspace"), "business")
+        query = _require_web_query(payload.get("query"), required=True)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    max_results = payload.get("max_results", 5)
+    if isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 10:
+        return jsonify({"error": "max_results must be a whole number from 1 to 10"}), 400
+    api_key = _tavily_api_key()
+    if api_key is None:
+        return jsonify({"error": "Tavily search is not configured on this server"}), 503
+
+    upstream_payload = {
+        "query": query,
+        "max_results": max_results,
+        "search_depth": "basic",
+        "include_answer": False,
+        "include_raw_content": False,
+    }
+    try:
+        upstream_request = urllib.request.Request(
+            TAVILY_SEARCH_URL,
+            data=json.dumps(upstream_payload).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        opener = urllib.request.build_opener(_NoRedirectHandler())
+        with opener.open(upstream_request, timeout=TAVILY_TIMEOUT_SECONDS) as response:
+            status = getattr(response, "status", None)
+            if status is None:
+                status = response.getcode()
+            if status != 200:
+                return jsonify({"error": "Tavily search is temporarily unavailable"}), 502
+            response_bytes = response.read(TAVILY_MAX_RESPONSE_BYTES + 1)
+    except Exception:
+        return jsonify({"error": "Tavily search is temporarily unavailable"}), 502
+
+    if not isinstance(response_bytes, (bytes, bytearray)) or len(response_bytes) > TAVILY_MAX_RESPONSE_BYTES:
+        return jsonify({"error": "Tavily returned an unusable response"}), 502
+    try:
+        upstream_result = json.loads(bytes(response_bytes).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return jsonify({"error": "Tavily returned an unusable response"}), 502
+    if not isinstance(upstream_result, dict) or not isinstance(upstream_result.get("results"), list):
+        return jsonify({"error": "Tavily returned an unusable response"}), 502
+
+    provider_results = upstream_result["results"][:max_results]
+    if not all(isinstance(item, dict) for item in provider_results):
+        return jsonify({"error": "Tavily returned an unusable response"}), 502
+    mapped_results = [
+        {field: item.get(field) for field in ("title", "url", "content", "score")}
+        for item in provider_results
+    ]
+    if not mapped_results:
+        return jsonify({
+            "accepted": 0,
+            "skipped": 0,
+            "batch_id": None,
+            "source_id": None,
+            "query": query,
+            "requested": max_results,
+        })
+    retrieved_at = utc_now()
+    try:
+        result = import_web_evidence(
+            mapped_results,
+            workspace,
+            source_label="Tavily web search · unverified",
+            query=query,
+            retrieved_at=retrieved_at,
+        )
+    except ValueError:
+        return jsonify({"error": "Tavily returned an unusable response"}), 502
+    except Exception:
+        return jsonify({"error": "Web search evidence could not be saved"}), 500
+    return jsonify({**result, "query": query, "requested": max_results})
 
 
 @app.post("/api/sources/intake/scan")

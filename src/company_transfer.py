@@ -60,6 +60,10 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "employees": (
         "id", "workspace_id", "name", "department", "office",
     ),
+    "employee_budgets": (
+        "workspace_id", "employee_id", "period", "budget_cents", "currency",
+        "source_id", "updated_at",
+    ),
     "expense_reports": (
         "id", "workspace_id", "employee_id", "merchant", "amount_cents",
         "currency", "spent_on", "category", "purpose", "receipt_status",
@@ -73,6 +77,11 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "email_evidence": (
         "id", "workspace_id", "provider", "sender", "subject", "received_at",
         "snippet", "source_label", "is_synthetic", "content_hash", "imported_at",
+    ),
+    "web_evidence": (
+        "id", "workspace_id", "batch_id", "source_id", "title", "url",
+        "content", "score", "source_label", "query", "retrieved_at",
+        "is_untrusted", "content_hash", "imported_at",
     ),
     "intake_documents": (
         "id", "workspace_id", "filename", "document_type", "source_id",
@@ -101,8 +110,9 @@ PROFILE_COLUMNS = (
 )
 
 MAJOR_REPORT_TABLES = (
-    "transactions", "invoices", "receipts", "bank_transactions",
-    "expense_reports", "email_evidence", "intake_documents", "reconciliations",
+    "transactions", "invoices", "receipts", "bank_transactions", "employee_budgets",
+    "expense_reports", "email_evidence", "web_evidence", "intake_documents",
+    "reconciliations",
 )
 
 _CREDENTIAL_ASSIGNMENT = re.compile(

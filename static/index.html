@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#020813">
+  <meta name="theme-color" content="#07111f">
   <title>PayProof Atlas</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
@@ -14,67 +14,83 @@
       <div class="brand-area">
         <div class="brand-lockup">
           <div class="brand-mark" aria-hidden="true"><span>P</span></div>
-          <div><h1>PayProof <em>Atlas</em></h1><p>Trust & Risk · Evidence before action.</p></div>
+          <div><h1>PayProof <em>Atlas</em></h1><p>Know where the money went. Know why.</p></div>
         </div>
-        <div id="activeCompanyBrand" class="active-company-brand" aria-live="polite">
-          <div class="active-company-logo"><img id="activeCompanyLogo" alt="" hidden><span id="activeCompanyInitials">MW</span></div>
-          <div class="active-company-copy"><span>ACTIVE COMPANY</span><strong id="activeCompanyName">Meridian Works</strong><a id="activeCompanyWebsite" target="_blank" rel="noopener noreferrer" hidden></a></div>
+
+        <div class="company-menu">
+          <button id="companyMenuToggle" class="active-company-brand" aria-expanded="false" aria-controls="companyQuickPanel">
+            <div class="active-company-logo"><img id="activeCompanyLogo" alt="" hidden><span id="activeCompanyInitials">MW</span></div>
+            <div class="active-company-copy"><span>ACTIVE COMPANY</span><strong id="activeCompanyName">Meridian Works</strong><span id="activeCompanyWebsite" hidden></span></div>
+            <span class="company-chevron" aria-hidden="true">⌄</span>
+          </button>
+          <section id="companyQuickPanel" class="company-quick-panel hidden" aria-label="Company switcher">
+            <header><div><span class="section-label">YOUR BUSINESSES</span><h2>Choose a company</h2></div><button id="companyMenuClose" class="mini-icon" aria-label="Close company menu">×</button></header>
+            <label class="company-select-label">Active company<select id="workspaceSelect" aria-label="Switch company"></select></label>
+            <div id="companyQuickList" class="company-quick-list"></div>
+            <div class="company-menu-actions"><button id="quickAddCompany" class="button primary">+ Add company</button><button id="quickManageCompany" class="button ghost">Manage companies</button></div>
+          </section>
         </div>
       </div>
+
       <div class="top-status">
-        <label class="workspace-picker"><span>SWITCH COMPANY</span><select id="workspaceSelect" aria-label="Switch company"></select></label>
         <span id="workspaceTypePill" class="pill cyan">SYNTHETIC EXAMPLE</span>
         <span id="prismPill" class="pill muted"><i></i> PRISM CHECKING</span>
-        <button id="importOpen" class="button ghost">＋ Import</button>
-        <button id="sourcesOpen" class="button ghost" aria-haspopup="dialog">⚙ Sources</button>
-        <button id="tourButton" class="button primary">▶ Guided demo</button>
+        <button id="bankHeaderStatus" class="connection-pill" aria-label="Open bank connections"><i></i><span>Bank</span><b>Checking</b></button>
+        <button id="emailHeaderStatus" class="connection-pill" aria-label="Open email connections"><i></i><span>Email</span><b>Checking</b></button>
+        <button id="intakeHeaderStatus" class="connection-pill" aria-label="Open intake folders"><i></i><span>Intake</span><b>Checking</b></button>
+        <button id="themeToggle" class="icon-button theme-toggle" aria-label="Switch color theme" title="Switch light or dark mode">☀</button>
+        <button id="importOpen" class="button ghost">+ Import</button>
+        <button id="sourcesOpen" class="button ghost" aria-haspopup="dialog">Connections</button>
+        <button id="tourButton" class="button primary">▶ Demo</button>
       </div>
     </header>
 
     <aside class="rail glass">
-      <div class="section-label">VISUAL MODE</div>
-      <nav id="viewNav" class="view-nav" aria-label="Visual mode">
-        <button class="active" data-view="atlas"><span>◉</span><b>Atlas</b><small>3D evidence graph</small></button>
-        <button data-view="change"><span>↗</span><b>Readiness</b><small>Control analysis</small></button>
-        <button data-view="geo"><span>⌖</span><b>Coverage</b><small>Sources & owners</small></button>
-        <button data-view="people"><span>♙</span><b>People & spending</b><small>Employee reports</small></button>
-        <button data-view="records"><span>▦</span><b>Evidence</b><small>Source records</small></button>
+      <div class="section-label">COMPANY WORKSPACE</div>
+      <nav id="viewNav" class="view-nav" aria-label="Company workspace">
+        <button class="active" data-view="overview"><span>⌂</span><b>Dashboard</b><small>Business at a glance</small></button>
+        <button data-view="change"><span>↗</span><b>Money &amp; trends</b><small>Income, spending, savings</small></button>
+        <button data-view="people"><span>♙</span><b>People &amp; budgets</b><small>Employee spending</small></button>
+        <button data-view="records"><span>▦</span><b>Risk &amp; documents</b><small>Items needing review</small></button>
+        <button data-view="geo"><span>⌁</span><b>Connections</b><small>Bank, email, intake</small></button>
+        <button data-view="atlas"><span>◎</span><b>Evidence links</b><small>Optional relationship view</small></button>
       </nav>
       <div class="rail-divider"></div>
-      <div class="section-label">PRIORITY CONTROLS</div>
+      <div class="section-label">NEEDS ATTENTION</div>
       <div id="findingRail" class="finding-rail"></div>
       <div class="rail-spacer"></div>
       <button id="resetButton" class="button ghost full">↻ Reset example</button>
-      <div class="safety-note"><span>✓</span><div><b>Evidence controlled</b><small>No unsupported claim</small></div></div>
+      <div class="safety-note"><span>✓</span><div><b>Evidence first</b><small>Unknown stays unknown</small></div></div>
     </aside>
 
     <main class="command-center">
       <section class="hero-line">
-        <div><div class="eyebrow"><span id="activeCompanyContext">MERIDIAN WORKS</span> · LIVE TRUST &amp; RISK CONTEXT</div><h2 id="viewTitle">Security assurance atlas</h2></div>
-        <div class="hero-actions"><span id="offlineStatus" class="offline-indicator hidden" role="alert"><i aria-hidden="true"></i> OFFLINE · ONLINE REFRESH PAUSED</span><label class="auto-refresh-control"><span>AUTO REFRESH</span><select id="autoRefreshSelect" aria-label="Automatic refresh interval"><option value="5">Every 5 min</option><option value="10">Every 10 min</option></select></label><span id="updatedAt" class="live-update" role="status" aria-live="polite"><i aria-hidden="true"></i> Loading…</span><button id="refreshButton" class="icon-button" title="Refresh company data" aria-label="Refresh company data">↻</button></div>
+        <div><div class="eyebrow"><span id="activeCompanyContext">MERIDIAN WORKS</span> · LIVE BOOKKEEPING &amp; RISK</div><h2 id="viewTitle">Business dashboard</h2></div>
+        <div class="hero-actions"><span id="offlineStatus" class="offline-indicator hidden" role="alert"><i aria-hidden="true"></i> OFFLINE · REFRESH PAUSED</span><label class="auto-refresh-control"><span>AUTO REFRESH</span><select id="autoRefreshSelect" aria-label="Automatic refresh interval"><option value="5">Every 5 min</option><option value="10">Every 10 min</option></select></label><span id="updatedAt" class="live-update" role="status" aria-live="polite"><i aria-hidden="true"></i> Loading…</span><button id="refreshButton" class="icon-button" title="Refresh company data" aria-label="Refresh company data">↻</button></div>
       </section>
 
       <section id="metrics" class="metrics"></section>
 
       <section class="visual-panel glass">
         <div class="panel-head">
-          <div><span class="section-label">INTERACTIVE MODEL</span><h3 id="panelTitle">Financial relationships</h3></div>
+          <div><span class="section-label">LIVE COMPANY VIEW</span><h3 id="panelTitle">Financial overview</h3></div>
           <div class="legend"><span><i class="dot clear"></i>Verified</span><span><i class="dot review"></i>Review</span><span><i class="dot high"></i>Changed</span></div>
         </div>
         <div id="visualStage" class="visual-stage">
-          <canvas id="atlasCanvas" aria-label="Interactive financial relationship map"></canvas>
+          <div id="overviewView" class="overview-view"></div>
+          <canvas id="atlasCanvas" class="hidden" aria-label="Interactive evidence relationship view"></canvas>
           <div id="changeView" class="change-view hidden"></div>
           <div id="geoView" class="geo-view hidden"></div>
           <div id="peopleView" class="people-view hidden"></div>
           <div id="recordsView" class="records-view hidden"></div>
-          <div class="canvas-tools"><button id="zoomOut" title="Zoom out">−</button><button id="zoomReset" title="Reset view">◎</button><button id="zoomIn" title="Zoom in">＋</button></div>
+          <div class="canvas-tools hidden"><button id="zoomOut" title="Zoom out">−</button><button id="zoomReset" title="Reset view">◎</button><button id="zoomIn" title="Zoom in">+</button></div>
           <div id="selectionCard" class="selection-card"></div>
         </div>
-        <div class="visual-foot"><span id="visualHint">Click any node to inspect its evidence and ask follow-up questions.</span><button id="contextOpen" class="link-button">Context used ↗</button></div>
+        <div class="visual-foot"><span id="visualHint">Choose any card to see the records behind it.</span><button id="contextOpen" class="link-button">How this answer was built ↗</button></div>
       </section>
 
       <section id="focusPanel" class="focus-panel glass">
-        <div class="focus-copy"><span class="section-label">SELECTED CONTROL</span><h3 id="focusTitle">Loading evidence…</h3><p id="focusSummary"></p></div>
+        <div class="focus-copy"><span class="section-label">SELECTED ITEM</span><h3 id="focusTitle">Loading evidence…</h3><p id="focusSummary"></p></div>
         <div id="comparison" class="comparison"></div>
         <div class="focus-actions"><button data-action="hold" class="button danger">Hold</button><button data-action="manual_review" class="button amber">Review</button><button id="evidenceButton" class="button ghost">Evidence</button></div>
       </section>
@@ -82,23 +98,23 @@
 
     <aside class="assistant glass">
       <div class="assistant-head">
-        <div><span class="section-label">EVIDENCE-GROUNDED ASSISTANT</span><h2>Ask PayProof</h2></div>
+        <div><span class="section-label">BOOKKEEPING ASSISTANT</span><h2>Ask PayProof</h2></div>
         <div class="assistant-orb"><i></i></div>
       </div>
-      <div class="assistant-badges"><span>BOUNDED CONTEXT</span><span>DETERMINISTIC MATH</span></div>
+      <div class="assistant-badges"><span>USES SAVED RECORDS</span><span>SHOWS ITS SOURCES</span></div>
       <div class="voice-controls" aria-label="Hands-free controls">
-        <div class="voice-buttons"><button id="micToggle" class="voice-button" type="button" aria-pressed="false" title="Start microphone input; your browser may ask for permission">◉ Mic off</button><button id="spokenRepliesToggle" class="voice-button" type="button" aria-pressed="false" disabled>♩ Spoken replies off</button></div>
-        <span id="voiceStatus" role="status" aria-live="polite">Voice controls are off and start only when clicked.</span>
+        <div class="voice-buttons"><button id="micToggle" class="voice-button" type="button" aria-pressed="false" title="Start microphone input; your browser may ask for permission">● Mic off</button><button id="spokenRepliesToggle" class="voice-button" type="button" aria-pressed="false" disabled>♪ Spoken replies off</button></div>
+        <span id="voiceStatus" role="status" aria-live="polite">Voice controls start only when you click them.</span>
       </div>
       <div id="suggestions" class="suggestions">
-        <button>Is MFA enabled?</button><button>Are backups current?</button><button>Who has production access?</button><button>Complete the questionnaire</button>
+        <button>What was the last transaction?</button><button>What needs my attention?</button><button>Who is over budget?</button><button>Is revenue increasing?</button>
       </div>
       <div id="chatLog" class="chat-log" aria-live="polite"></div>
       <div class="chat-compose">
-        <textarea id="chatInput" rows="2" placeholder="Ask about this view, a vendor, a total, or a change…"></textarea>
+        <textarea id="chatInput" rows="2" placeholder="Ask about money, people, documents, or risk…"></textarea>
         <button id="chatSend" class="send-button" aria-label="Send question">↑</button>
       </div>
-      <div class="assistant-foot"><button id="chatContextButton" class="link-button">Inspect answer context</button><span id="traceStatus">Trace: waiting</span></div>
+      <div class="assistant-foot"><button id="chatContextButton" class="link-button">See answer sources</button><span id="traceStatus">Trace: waiting</span></div>
     </aside>
   </div>
 

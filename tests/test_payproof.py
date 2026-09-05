@@ -57,9 +57,9 @@ class PayProofCoreTests(IsolatedPayProofTestCase):
         self.assertEqual(dashboard["metrics"]["recorded_spending"], sum(t["amount_cents"] for t in dashboard["transactions"]))
         self.assertEqual(len(dashboard["emails"]), 5)
         self.assertTrue(all(email["is_synthetic"] for email in dashboard["emails"]))
-        self.assertEqual(len(dashboard["employees"]), 3)
-        self.assertEqual(len(dashboard["expenses"]), 4)
-        self.assertEqual(dashboard["metrics"]["employee_spend"], 121094)
+        self.assertEqual(len(dashboard["employees"]), 4)
+        self.assertEqual(len(dashboard["expenses"]), 8)
+        self.assertEqual(dashboard["metrics"]["employee_spend"], 693377)
         self.assertGreater(dashboard["metrics"]["cash_in"], 0)
 
     def test_financial_graph_has_bounded_resolvable_transactions_and_receipts(self):
@@ -76,11 +76,87 @@ class PayProofCoreTests(IsolatedPayProofTestCase):
     def test_intake_scan_is_idempotent_and_employee_expenses_are_grounded(self):
         result = core.scan_intake_folder()
         self.assertEqual(result["accepted"], 0)
-        self.assertGreaterEqual(result["skipped"], 4)
+        self.assertGreaterEqual(result["skipped"], 8)
         answer = core.answer_question("Which employee expense reports need review?", "business")
-        self.assertEqual(answer.calculation["report_count"], 4)
-        self.assertEqual(answer.calculation["needs_review"], 1)
+        self.assertEqual(answer.calculation["report_count"], 8)
+        self.assertEqual(answer.calculation["needs_review"], 5)
         self.assertIn("Priya Shah", answer.answer)
+
+    def test_demo_review_documents_are_explainable_without_accusing_fraud(self):
+        dashboard = core.get_dashboard("business")
+        review_ids = {finding["id"] for finding in dashboard["findings"]}
+        self.assertTrue({
+            "F-EXP-MEAL-001", "F-EXP-DUP-001", "F-EXP-GIFT-001",
+            "F-EXP-SOFT-001",
+        }.issubset(review_ids))
+
+        general = core.answer_question(
+            "Why are these marked possible fraud?", "business",
+        )
+        self.assertIn("warning patterns", general.answer)
+        self.assertIn("not findings that fraud occurred", general.answer)
+        self.assertGreaterEqual(general.calculation["review_count"], 4)
+
+        selected = core.answer_question(
+            "Why does this need review?", "business", "expense:EXP-2026-047",
+        )
+        self.assertIn("gift cards", selected.answer.lower())
+        self.assertIn("not saying that fraud occurred", selected.answer)
+        self.assertIn("intake:EXP-2026-047.json", selected.evidence_ids)
+
+        documents = core.answer_question(
+            "Show me the intake document list", "business",
+        )
+        self.assertEqual(documents.calculation["document_count"], 8)
+        self.assertEqual(documents.calculation["synthetic_count"], 8)
+        self.assertIn("EXP-2026-048.json", documents.answer)
+
+    def test_demo_intake_review_state_survives_a_rescan(self):
+        core.record_action("business", "F-EXP-GIFT-001", "hold")
+        core.scan_intake_folder("business")
+        finding = next(
+            item for item in core.get_dashboard("business")["findings"]
+            if item["id"] == "F-EXP-GIFT-001"
+        )
+        self.assertEqual(finding["status"], "held")
+
+    def test_bookkeeping_intents_are_not_hijacked_by_selected_security_control(self):
+        latest = core.answer_question(
+            "what was the last transaction", "business", "control:CTRL-BACKUP",
+        )
+        self.assertEqual(latest.calculation["latest_date"], "2026-08-27")
+        self.assertEqual(latest.calculation["source_type"], "bank")
+        self.assertIn("Lakeside Bistro", latest.answer)
+        self.assertNotIn("backup", latest.answer.lower())
+
+        review = core.answer_question(
+            "tell me about my things that needs review", "business", "control:CTRL-BACKUP",
+        )
+        self.assertGreater(review.calculation["review_count"], 0)
+        self.assertIn("waiting for review", review.answer)
+        self.assertNotIn("backup requires daily", review.answer.lower())
+
+    def test_employee_budget_answers_are_calculated_from_saved_records(self):
+        dashboard = core.get_dashboard("business")
+        self.assertEqual(len(dashboard["employee_budgets"]), 4)
+        answer = core.answer_question("Who is over budget?", "business")
+        self.assertEqual(answer.calculation["period"], "2026-09")
+        self.assertGreaterEqual(answer.calculation["over_budget_count"], 1)
+        self.assertIn("Maya Chen", answer.answer)
+        self.assertIn("over budget", answer.answer)
+
+        maya = next(item for item in dashboard["employees"] if item["name"] == "Maya Chen")
+        updated = core.set_employee_budget("business", maya["id"], "2500.00", "USD", "2026-09")
+        self.assertEqual(updated["budget_cents"], 250000)
+        refreshed = core.answer_question("Who is over budget?", "business")
+        maya_row = next(item for item in refreshed.calculation["employees"] if item["name"] == "Maya Chen")
+        self.assertEqual(maya_row["budget_cents"], 250000)
+
+    def test_revenue_trend_answer_is_grounded_and_scoped(self):
+        result = core.answer_question("Is revenue increasing?", "business", "control:CTRL-BACKUP")
+        self.assertIn("transactions explicitly marked as income", result.answer)
+        self.assertIn("USD", result.calculation["revenue_by_currency"])
+        self.assertNotIn("backup", result.answer.lower())
 
     def test_money_in_and_out_are_separate(self):
         answer = core.answer_question("Show money in and money out", "business")
@@ -750,6 +826,27 @@ class PayProofApiTests(IsolatedPayProofTestCase):
         self.assertEqual(self.client.post("/api/sources/intake/scan").status_code, 200)
         questionnaire = self.client.get("/api/security/questionnaire").get_json()
         self.assertEqual(len(questionnaire["answers"]), 7)
+
+    def test_budget_route_and_web_snapshot_route_remain_independent(self):
+        dashboard = self.client.get("/api/dashboard?workspace=business").get_json()
+        maya = next(item for item in dashboard["employees"] if item["name"] == "Maya Chen")
+        budget = self.client.put(f"/api/employees/{maya['id']}/budget", json={
+            "workspace": "business", "amount": "2750.00", "currency": "USD",
+            "period": "2026-09",
+        })
+        self.assertEqual(budget.status_code, 200)
+        self.assertEqual(budget.get_json()["budget_cents"], 275000)
+
+        snapshot = self.client.post("/api/sources/web/import", json={
+            "workspace": "business", "query": "Example vendor registration",
+            "items": [{
+                "title": "Example public registry result",
+                "url": "https://registry.example.org/company/example-vendor",
+                "content": "Unverified public registry search lead.",
+            }],
+        })
+        self.assertEqual(snapshot.status_code, 200)
+        self.assertEqual(snapshot.get_json()["accepted"], 1)
 
     def test_empty_chat_and_bad_action_have_clear_errors(self):
         self.assertEqual(self.client.post("/api/chat", json={"question": ""}).status_code, 400)

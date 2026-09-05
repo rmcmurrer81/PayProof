@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import ipaddress
 import io
 import json
+import math
 import os
 import random
 import re
@@ -185,9 +187,28 @@ CREATE TABLE IF NOT EXISTS email_evidence (
     snippet TEXT, source_label TEXT NOT NULL, is_synthetic INTEGER NOT NULL,
     content_hash TEXT NOT NULL, imported_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS web_evidence (
+    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
+    batch_id TEXT NOT NULL, source_id TEXT NOT NULL,
+    title TEXT NOT NULL, url TEXT NOT NULL, content TEXT NOT NULL,
+    score REAL, source_label TEXT NOT NULL, query TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL, is_untrusted INTEGER NOT NULL,
+    content_hash TEXT NOT NULL, imported_at TEXT NOT NULL,
+    UNIQUE(workspace_id, url, content_hash),
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+);
+CREATE INDEX IF NOT EXISTS idx_web_evidence_workspace_batch
+    ON web_evidence(workspace_id, batch_id);
 CREATE TABLE IF NOT EXISTS employees (
     id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, name TEXT NOT NULL,
     department TEXT NOT NULL, office TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS employee_budgets (
+    workspace_id TEXT NOT NULL, employee_id TEXT NOT NULL, period TEXT NOT NULL,
+    budget_cents INTEGER NOT NULL, currency TEXT NOT NULL, source_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, employee_id, period),
+    FOREIGN KEY(employee_id) REFERENCES employees(id)
 );
 CREATE TABLE IF NOT EXISTS expense_reports (
     id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, employee_id TEXT NOT NULL,
@@ -252,6 +273,12 @@ BANK_EDITABLE_EXPENSE_FIELDS = {
 }
 BANK_RECEIPT_STATUSES = {"matched", "missing", "not_required", "submitted"}
 BANK_APPROVAL_STATUSES = {"approved", "needs_review", "submitted", "rejected"}
+MAX_WEB_EVIDENCE_ITEMS = 10
+MAX_WEB_EVIDENCE_TITLE_CHARS = 500
+MAX_WEB_EVIDENCE_URL_CHARS = 2_048
+MAX_WEB_EVIDENCE_CONTENT_CHARS = 20_000
+MAX_WEB_EVIDENCE_QUERY_CHARS = 500
+MAX_WEB_EVIDENCE_SOURCE_LABEL_CHARS = 200
 
 
 VENDORS = [
@@ -284,6 +311,7 @@ def initialize_database(reset: bool = False) -> None:
         _ensure_default_intake_folder(connection)
         _seed_email_fixtures(connection)
         _scan_intake_directories(connection)
+        _seed_demo_budgets(connection)
         _backfill_intake_versions(connection)
         _seed_bank_fixtures(connection)
         for workspace_id in ("business", "personal"):
@@ -1001,6 +1029,33 @@ def _seed_bank_fixtures(connection: sqlite3.Connection) -> None:
     )
 
 
+def _seed_demo_budgets(connection: sqlite3.Connection) -> None:
+    """Attach transparent monthly budgets to the bundled fictional employees."""
+
+    budget_by_name = {
+        "Maya Chen": 150_000,
+        "Jordan Alvarez": 100_000,
+        "Priya Shah": 300_000,
+        "Alex Morgan": 150_000,
+    }
+    employee_rows = connection.execute(
+        "SELECT id, name FROM employees WHERE workspace_id='business'",
+    ).fetchall()
+    updated_at = utc_now()
+    rows = [
+        ("business", employee["id"], "2026-09", budget_by_name[employee["name"]],
+         "USD", "demo:budget-policy:2026-09", updated_at)
+        for employee in employee_rows if employee["name"] in budget_by_name
+    ]
+    connection.executemany(
+        """INSERT OR IGNORE INTO employee_budgets(
+               workspace_id, employee_id, period, budget_cents, currency,
+               source_id, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        rows,
+    )
+
+
 def _intake_source_id(workspace_id: str, folder_id: str, root: Path, path: Path) -> str:
     relative = path.relative_to(root).as_posix()
     if workspace_id == "business" and folder_id in {
@@ -1131,6 +1186,7 @@ def _scan_intake_directories(connection: sqlite3.Connection) -> dict[str, Any]:
         skipped += result["skipped"]
         errors.extend(result["errors"])
     _refresh_reconciliations(connection, "business")
+    _refresh_demo_intake_findings(connection, "business")
     connection.commit()
     return {"accepted": accepted, "skipped": skipped, "errors": errors,
             "folders_scanned": len(specs)}
@@ -1202,6 +1258,7 @@ def scan_intake_folder(workspace_id: str = "business",
             except ValueError as exc:
                 errors.append({"filename": folder["label"], "reason": str(exc)})
         _refresh_reconciliations(connection, workspace_id)
+        _refresh_demo_intake_findings(connection, workspace_id)
         connection.commit()
     return {"workspace": workspace_id, "accepted": accepted, "skipped": skipped,
             "errors": errors, "folders_scanned": len(scanned), "folders": scanned}
@@ -1384,6 +1441,63 @@ def list_intake_expense_history(workspace_id: str, expense_id: str) -> dict[str,
     return {"expense_id": expense_id, "original_preserved": True, "versions": rows}
 
 
+def set_employee_budget(workspace_id: str, employee_id: str,
+                        amount: str | int | float | Decimal,
+                        currency: str = "USD",
+                        period: str | None = None) -> dict[str, Any]:
+    """Create or update one evidence-labelled monthly employee budget."""
+
+    workspace_id = require_workspace(workspace_id)
+    employee_id = str(employee_id or "").strip()
+    if not employee_id or len(employee_id) > 200:
+        raise ValueError("A valid employee is required")
+    cents = money_to_cents(amount)
+    if cents <= 0 or cents > 1_000_000_000_00:
+        raise ValueError("Budget amount must be greater than zero and within the supported limit")
+    normalized_currency = str(currency or "").strip().upper()
+    if not re.fullmatch(r"[A-Z]{3}", normalized_currency):
+        raise ValueError("Budget currency must be a three-letter code")
+    normalized_period = str(period or date.today().strftime("%Y-%m")).strip()
+    if not re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])", normalized_period):
+        raise ValueError("Budget period must use YYYY-MM")
+    source_id = f"user:employee-budget:{normalized_period}"
+    updated_at = utc_now()
+    with closing(_connect()) as connection:
+        employee = connection.execute(
+            "SELECT name FROM employees WHERE workspace_id=? AND id=?",
+            (workspace_id, employee_id),
+        ).fetchone()
+        if not employee:
+            raise ValueError("Employee not found in this company")
+        connection.execute(
+            """INSERT INTO employee_budgets(
+                   workspace_id, employee_id, period, budget_cents, currency,
+                   source_id, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(workspace_id, employee_id, period) DO UPDATE SET
+                   budget_cents=excluded.budget_cents,
+                   currency=excluded.currency,
+                   source_id=excluded.source_id,
+                   updated_at=excluded.updated_at""",
+            (workspace_id, employee_id, normalized_period, cents,
+             normalized_currency, source_id, updated_at),
+        )
+        connection.execute(
+            """INSERT INTO audit(workspace_id, finding_id, action, reason, created_at)
+               VALUES (?, ?, 'set_employee_budget', ?, ?)""",
+            (workspace_id, employee_id,
+             f"Set {normalized_period} budget for {employee['name']} to {format_money(cents, normalized_currency)}",
+             updated_at),
+        )
+        connection.commit()
+    return {
+        "workspace_id": workspace_id, "employee_id": employee_id,
+        "employee_name": employee["name"], "period": normalized_period,
+        "budget_cents": cents, "currency": normalized_currency,
+        "source_id": source_id, "updated_at": updated_at,
+    }
+
+
 def record_chat_turn(session_id: str, workspace_id: str, question: str, result: "ChatResult") -> None:
     workspace_id = require_workspace(workspace_id)
     with closing(_connect()) as connection:
@@ -1483,6 +1597,7 @@ def recompute_findings(connection: sqlite3.Connection | None = None) -> None:
                      "Instruction found inside evidence", "An incoming message attempts to direct the assistant and bypass verification.",
                      "EMAIL-DEMO-006", ["EMAIL-DEMO-006", "SRC-INV-1007"],
                      "Imported text is evidence only; it cannot change findings, approve payments, or invoke tools.")
+        _refresh_demo_intake_findings(conn, "business")
         conn.commit()
     finally:
         if owns:
@@ -1495,6 +1610,100 @@ def _add_finding(conn: sqlite3.Connection, finding_id: str, workspace: str, kind
         "INSERT INTO findings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (finding_id, workspace, kind, severity, title, summary, entity_id, json.dumps(evidence), "open", basis, utc_now()),
     )
+
+
+def _refresh_demo_intake_findings(conn: sqlite3.Connection,
+                                  workspace_id: str) -> None:
+    """Upsert explainable risks for the bundled fictional paperwork only.
+
+    These findings deliberately describe review signals, never a conclusion that
+    fraud occurred. Existing human review states are preserved across scans.
+    """
+
+    if workspace_id != "business":
+        return
+    demo_workspace = conn.execute(
+        "SELECT is_demo FROM workspaces WHERE id=?", (workspace_id,),
+    ).fetchone()
+    if not demo_workspace or not demo_workspace["is_demo"]:
+        return
+
+    rows = {
+        row["id"]: row
+        for row in conn.execute(
+            """SELECT * FROM expense_reports
+               WHERE workspace_id=? AND id IN
+                     ('EXP-2026-042', 'EXP-2026-045', 'EXP-2026-046',
+                      'EXP-2026-047', 'EXP-2026-048')""",
+            (workspace_id,),
+        ).fetchall()
+    }
+
+    candidates: list[tuple[str, str, str, str, str, str, list[str], str]] = []
+    meal = rows.get("EXP-2026-045")
+    if (meal and meal["receipt_status"] == "missing"
+            and meal["approval_status"] == "needs_review"):
+        candidates.append((
+            "F-EXP-MEAL-001", "possible_fraud_document", "high",
+            "High meal claim missing a receipt",
+            "A synthetic $1,875.00 meal claim has no receipt or attendee list.",
+            meal["id"], [meal["source_id"]],
+            "The amount is high for a meal claim, the receipt is missing, and the business purpose does not identify attendees. Verify the original receipt, attendees, and manager approval. This is not proof of fraud.",
+        ))
+
+    original, duplicate = rows.get("EXP-2026-042"), rows.get("EXP-2026-046")
+    duplicate_fields = ("employee_id", "amount_cents", "currency", "spent_on",
+                        "category", "purpose")
+    if (original and duplicate
+            and all(original[field] == duplicate[field] for field in duplicate_fields)):
+        candidates.append((
+            "F-EXP-DUP-001", "possible_duplicate_expense", "medium",
+            "Possible duplicate employee paperwork",
+            "Two synthetic expense reports share employee, amount, date, category, and purpose.",
+            duplicate["id"], [original["source_id"], duplicate["source_id"]],
+            "EXP-2026-042 and EXP-2026-046 match on employee, $247.83 amount, currency, date, category, and purpose, but the merchant wording differs. Review both originals before deciding; PayProof does not call either fraudulent.",
+        ))
+
+    gift_card = rows.get("EXP-2026-047")
+    if (gift_card and gift_card["category"].casefold() == "gift cards"
+            and gift_card["receipt_status"] == "missing"):
+        candidates.append((
+            "F-EXP-GIFT-001", "possible_fraud_document", "high",
+            "Gift-card purchase needs verification",
+            "A synthetic $1,200.00 gift-card claim is missing its receipt and recipient list.",
+            gift_card["id"], [gift_card["source_id"]],
+            "High-value gift cards can be difficult to trace. The receipt and recipient list are missing, so a manager should verify the recipients and business purpose. This is a review signal, not proof of fraud.",
+        ))
+
+    software = rows.get("EXP-2026-048")
+    if software and software["approval_status"] == "needs_review":
+        candidates.append((
+            "F-EXP-SOFT-001", "policy_exception", "medium",
+            "Annual software commitment needs approval",
+            "A synthetic $2,400.00 annual subscription has paperwork but no recorded approval or contract owner.",
+            software["id"], [software["source_id"]],
+            "The annual commitment is still marked needs review, the contract owner is not recorded, and an existing company subscription should be checked first. This is a policy review, not proof of fraud.",
+        ))
+
+    for finding_id, kind, severity, title, summary, entity_id, evidence, basis in candidates:
+        conn.execute(
+            """INSERT INTO findings(
+                   id, workspace_id, kind, severity, title, summary, entity_id,
+                   evidence_ids, status, basis, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   workspace_id=excluded.workspace_id,
+                   kind=excluded.kind,
+                   severity=excluded.severity,
+                   title=excluded.title,
+                   summary=excluded.summary,
+                   entity_id=excluded.entity_id,
+                   evidence_ids=excluded.evidence_ids,
+                   basis=excluded.basis,
+                   created_at=excluded.created_at""",
+            (finding_id, workspace_id, kind, severity, title, summary, entity_id,
+             json.dumps(evidence), basis, utc_now()),
+        )
 
 
 def _rows(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -1517,7 +1726,19 @@ def get_dashboard(workspace_id: str = "business") -> dict[str, Any]:
         findings = _rows(conn, "SELECT * FROM findings WHERE workspace_id=? ORDER BY CASE severity WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END", (workspace_id,))
         audit = _rows(conn, "SELECT * FROM audit WHERE workspace_id=? ORDER BY id DESC LIMIT 20", (workspace_id,))
         emails = _rows(conn, "SELECT * FROM email_evidence WHERE workspace_id=? ORDER BY received_at DESC", (workspace_id,))
+        web_evidence = _rows(
+            conn,
+            """SELECT * FROM web_evidence WHERE workspace_id=?
+               ORDER BY retrieved_at DESC, id""",
+            (workspace_id,),
+        )
         employees = _rows(conn, "SELECT * FROM employees WHERE workspace_id=? ORDER BY name", (workspace_id,))
+        employee_budgets = _rows(
+            conn,
+            """SELECT * FROM employee_budgets WHERE workspace_id=?
+               ORDER BY period DESC, employee_id""",
+            (workspace_id,),
+        )
         expenses = _rows(conn, "SELECT * FROM expense_reports WHERE workspace_id=? ORDER BY spent_on DESC", (workspace_id,))
         documents = _rows(conn, "SELECT * FROM intake_documents WHERE workspace_id=? ORDER BY imported_at DESC", (workspace_id,))
         bank_transactions = _rows(conn, "SELECT * FROM bank_transactions WHERE workspace_id=? ORDER BY posted_on DESC", (workspace_id,))
@@ -1636,8 +1857,10 @@ def get_dashboard(workspace_id: str = "business") -> dict[str, Any]:
             "reconciled_bank_transactions": reconciliation["summary"]["with_suggestions"],
         },
         "vendors": vendors, "transactions": transactions, "invoices": invoices,
-        "receipts": receipts, "emails": emails, "employees": employees, "expenses": expenses,
-        "documents": documents, "findings": findings, "audit": audit,
+        "receipts": receipts, "emails": emails, "employees": employees,
+        "employee_budgets": employee_budgets, "expenses": expenses,
+        "web_evidence": web_evidence, "documents": documents,
+        "findings": findings, "audit": audit,
         "bank_transactions": bank_transactions, "reconciliation": reconciliation,
         "graph": {"nodes": nodes, "edges": edges},
         "security": security_view,
@@ -1712,7 +1935,7 @@ def get_record(entity_id: str, workspace_id: str) -> dict[str, Any] | None:
         return next((dict(item) for item in _security_view()["controls"] if item["id"] == raw_id), None)
     if workspace_id == "business" and prefix == "security":
         return next((dict(item) for item in _security_view()["evidence"] if item["id"] == raw_id), None)
-    table = {"vendor": "vendors", "invoice": "invoices", "transaction": "transactions", "receipt": "receipts", "email": "email_evidence", "employee": "employees", "expense": "expense_reports", "document": "intake_documents", "bank": "bank_transactions"}.get(prefix)
+    table = {"vendor": "vendors", "invoice": "invoices", "transaction": "transactions", "receipt": "receipts", "email": "email_evidence", "web": "web_evidence", "employee": "employees", "expense": "expense_reports", "document": "intake_documents", "bank": "bank_transactions"}.get(prefix)
     if not table:
         return None
     with closing(_connect()) as conn:
@@ -1829,11 +2052,387 @@ def answer_question(question: str, workspace_id: str = "business", selected_id: 
         )
     ):
         selected_id = _recent_chat_focus(session_id, workspace_id)
-    if workspace_id == "business":
+    security_language = any(phrase in text for phrase in (
+        "mfa", "multi factor", "multi-factor", "backup", "backups",
+        "vulnerability", "encryption at rest", "production access",
+        "access to production", "customer data stored", "storage location",
+        "offboard", "former employee", "termination", "security",
+        "questionnaire", "control", "iso 27001", "soc 2", "fedramp",
+        "certification", "compliance",
+    ))
+    selected_security_follow_up = bool(
+        selected_id and selected_id.startswith("control:") and (
+            text in {"why", "why?", "which ones", "which ones?", "how so", "how so?"}
+            or any(phrase in text for phrase in (
+                "this control", "selected control", "show its evidence",
+                "show the evidence", "tell me more about it", "what about it",
+            ))
+        )
+    )
+    # The UI always sends its selected card. A selected security card must not
+    # hijack an unrelated bookkeeping question such as "last transaction".
+    if workspace_id == "business" and (security_language or selected_security_follow_up):
         security_result = _answer_security_question(text, selected_id)
         if security_result:
             return security_result
     with closing(_connect()) as conn:
+        review_language = any(phrase in text for phrase in (
+            "possible fraud", "marked fraud", "marked possible", "flagged document",
+            "documents flagged", "why does", "why are these", "why is this",
+            "need review", "needs review", "needing review", "review queue",
+            "things to review", "items to review", "what should i review",
+            "what needs my attention", "needs my attention",
+        ))
+        employee_review_language = any(phrase in text for phrase in (
+            "employee", "expense report", "staff spend", "people spending",
+        ))
+
+        if review_language and "why" not in text and not employee_review_language:
+            review_findings = conn.execute(
+                """SELECT * FROM findings
+                   WHERE workspace_id=? AND status IN ('open', 'held', 'review')
+                   ORDER BY CASE severity WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+                            created_at DESC, id LIMIT 20""",
+                (workspace_id,),
+            ).fetchall()
+            if not review_findings:
+                return ChatResult(
+                    "Nothing in this company is waiting for review right now.",
+                    [], [], {"review_count": 0, "high_priority_count": 0},
+                )
+            high_priority = [row for row in review_findings if row["severity"] == "high"]
+            shown = review_findings[:5]
+            listing = "; ".join(
+                f"{row['title']} ({row['severity']} priority)" for row in shown
+            )
+            remainder = len(review_findings) - len(shown)
+            tail = f" There are {remainder} more in the review list." if remainder else ""
+            evidence = list(dict.fromkeys(
+                evidence_id
+                for row in review_findings
+                for evidence_id in json.loads(row["evidence_ids"])
+            ))
+            focus_ids = [
+                focus for row in shown
+                if (focus := (
+                    f"invoice:{row['entity_id']}" if str(row["entity_id"]).startswith("INV-")
+                    else f"transaction:{row['entity_id']}" if str(row["entity_id"]).startswith("TX-")
+                    else f"email:{row['entity_id']}" if str(row["entity_id"]).startswith("EMAIL-")
+                    else f"expense:{row['entity_id']}" if str(row["entity_id"]).startswith("EXP-")
+                    else None
+                ))
+            ]
+            return ChatResult(
+                f"You have {len(review_findings)} items waiting for review, including "
+                f"{len(high_priority)} high-priority item(s). Start with: {listing}.{tail} "
+                "These are warning signals, not proof of fraud. Ask me why an item was flagged and I will show the evidence.",
+                evidence, focus_ids,
+                {"review_count": len(review_findings),
+                 "high_priority_count": len(high_priority),
+                 "shown_count": len(shown)},
+            )
+
+        if review_language and "why" in text:
+            selected_raw = (
+                selected_id.split(":", 1)[1]
+                if selected_id and ":" in selected_id else selected_id
+            )
+            selected_finding = None
+            if selected_raw:
+                selected_finding = conn.execute(
+                    """SELECT * FROM findings
+                       WHERE workspace_id=? AND entity_id=?
+                       ORDER BY CASE severity WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END
+                       LIMIT 1""",
+                    (workspace_id, selected_raw),
+                ).fetchone()
+            if selected_finding:
+                evidence = json.loads(selected_finding["evidence_ids"])
+                return ChatResult(
+                    f"{selected_finding['title']} needs a person to check it because "
+                    f"{selected_finding['basis']} PayProof is marking a possible issue, "
+                    "not saying that fraud occurred.",
+                    evidence, [selected_id] if selected_id else [],
+                    {"finding_id": selected_finding["id"],
+                     "status": selected_finding["status"],
+                     "classification": "review_signal_not_fraud_conclusion"},
+                )
+
+            review_findings = conn.execute(
+                """SELECT * FROM findings
+                   WHERE workspace_id=? AND status IN ('open', 'held', 'review')
+                   ORDER BY CASE severity WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+                            id LIMIT 8""",
+                (workspace_id,),
+            ).fetchall()
+            if not review_findings:
+                return ChatResult(
+                    "I do not see any documents marked for possible-fraud review in this company.",
+                    [], [], {"review_count": 0},
+                )
+            explanations = "; ".join(
+                f"{row['title']}: {row['basis']}" for row in review_findings
+            )
+            evidence = list(dict.fromkeys(
+                evidence_id
+                for row in review_findings
+                for evidence_id in json.loads(row["evidence_ids"])
+            ))
+            return ChatResult(
+                f"I found {len(review_findings)} item(s) that need a person to check. "
+                f"{explanations} These are warning patterns, not findings that fraud occurred.",
+                evidence,
+                [
+                    focus
+                    for row in review_findings
+                    if (focus := (
+                        f"invoice:{row['entity_id']}" if str(row["entity_id"]).startswith("INV-")
+                        else f"transaction:{row['entity_id']}" if str(row["entity_id"]).startswith("TX-")
+                        else f"email:{row['entity_id']}" if str(row["entity_id"]).startswith("EMAIL-")
+                        else f"expense:{row['entity_id']}" if str(row["entity_id"]).startswith("EXP-")
+                        else None
+                    ))
+                ],
+                {"review_count": len(review_findings),
+                 "classification": "review_signals_not_fraud_conclusions"},
+            )
+
+        wants_latest_transaction = any(phrase in text for phrase in (
+            "last transaction", "latest transaction", "most recent transaction",
+            "newest transaction", "last purchase", "latest purchase",
+        ))
+        wants_recent_transactions = any(phrase in text for phrase in (
+            "recent transactions", "latest transactions", "newest transactions",
+            "show transactions", "list transactions",
+        ))
+        if wants_latest_transaction or wants_recent_transactions:
+            bank_rows = conn.execute(
+                """SELECT * FROM bank_transactions WHERE workspace_id=?
+                   ORDER BY posted_on DESC, imported_at DESC, id DESC LIMIT 5""",
+                (workspace_id,),
+            ).fetchall()
+            ledger_rows = conn.execute(
+                """SELECT * FROM transactions WHERE workspace_id=?
+                   ORDER BY occurred_on DESC, id DESC LIMIT 5""",
+                (workspace_id,),
+            ).fetchall()
+            candidates: list[dict[str, Any]] = []
+            for row in bank_rows:
+                candidates.append({
+                    "date": row["posted_on"], "id": row["id"],
+                    "merchant": row["description"], "amount_cents": row["amount_cents"],
+                    "currency": row["currency"], "direction": row["direction"],
+                    "source_id": row["source_id"], "focus": f"bank:{row['id']}",
+                    "kind": "bank", "account_mask": row["account_mask"],
+                })
+            for row in ledger_rows:
+                candidates.append({
+                    "date": row["occurred_on"], "id": row["id"],
+                    "merchant": row["merchant_raw"], "amount_cents": row["amount_cents"],
+                    "currency": row["currency"],
+                    "direction": "incoming" if row["kind"] == "income" else (
+                        "refund" if row["kind"] == "refund" else "outgoing"
+                    ),
+                    "source_id": row["source_id"], "focus": f"transaction:{row['id']}",
+                    "kind": "ledger", "account_mask": None,
+                })
+            candidates.sort(key=lambda item: (item["date"], item["kind"] == "bank", item["id"]), reverse=True)
+            if not candidates:
+                return ChatResult(
+                    "I do not have any transactions for this company yet. Connect a bank or import a statement, then ask again.",
+                    [], [], {"status": "unknown", "transaction_count": 0},
+                )
+            shown = candidates[:1] if wants_latest_transaction else candidates[:5]
+            descriptions = []
+            for item in shown:
+                amount = format_money(abs(item["amount_cents"]), item["currency"])
+                account = f" from account {item['account_mask']}" if item["account_mask"] else ""
+                descriptions.append(
+                    f"{item['date']}: {amount} {item['direction']} at {item['merchant']}{account}"
+                )
+            lead = "Your latest loaded transaction is" if len(shown) == 1 else "Your most recent loaded transactions are"
+            return ChatResult(
+                f"{lead}: {'; '.join(descriptions)}. I am reporting saved records only; open the transaction to see its linked evidence.",
+                [item["source_id"] for item in shown],
+                [item["focus"] for item in shown],
+                {"transaction_count": len(candidates), "shown_count": len(shown),
+                 "latest_date": shown[0]["date"], "source_type": shown[0]["kind"]},
+            )
+
+        if any(phrase in text for phrase in (
+                "budget", "over budget", "under budget", "spending too much",
+                "spending too little", "who is spending", "top spender")):
+            periods = conn.execute(
+                "SELECT DISTINCT period FROM employee_budgets WHERE workspace_id=? ORDER BY period DESC",
+                (workspace_id,),
+            ).fetchall()
+            if not periods:
+                return ChatResult(
+                    "I do not have employee budgets for this company yet. Add them in People & budgets, then I can compare spending with the plan.",
+                    [], [], {"status": "unknown", "budget_count": 0},
+                )
+            period = periods[0]["period"]
+            rows = conn.execute(
+                """SELECT p.id, p.name, b.budget_cents, b.currency, b.source_id,
+                          COALESCE(SUM(CASE WHEN substr(e.spent_on, 1, 7)=b.period
+                                           AND e.currency=b.currency THEN e.amount_cents ELSE 0 END), 0) AS spent_cents,
+                          COUNT(CASE WHEN substr(e.spent_on, 1, 7)=b.period
+                                      AND e.currency=b.currency THEN 1 END) AS report_count
+                   FROM employee_budgets b
+                   JOIN employees p ON p.workspace_id=b.workspace_id AND p.id=b.employee_id
+                   LEFT JOIN expense_reports e ON e.workspace_id=p.workspace_id AND e.employee_id=p.id
+                   WHERE b.workspace_id=? AND b.period=?
+                   GROUP BY p.id, p.name, b.budget_cents, b.currency, b.source_id
+                   ORDER BY spent_cents DESC, p.name""",
+                (workspace_id, period),
+            ).fetchall()
+            summaries = []
+            calculations = []
+            evidence = []
+            for row in rows:
+                spent = row["spent_cents"]
+                budget = row["budget_cents"]
+                percent = round(spent / budget * 100) if budget else None
+                status = "over budget" if spent > budget else ("below 50% used" if budget and spent < budget / 2 else "within budget")
+                percent_text = f"{percent}%" if percent is not None else "unknown usage"
+                summaries.append(
+                    f"{row['name']} is {status} at {format_money(spent, row['currency'])} of "
+                    f"{format_money(budget, row['currency'])} ({percent_text})"
+                )
+                calculations.append({
+                    "employee_id": row["id"], "name": row["name"],
+                    "spent_cents": spent, "budget_cents": budget,
+                    "currency": row["currency"], "percent_used": percent,
+                    "status": status,
+                })
+                evidence.append(row["source_id"])
+            return ChatResult(
+                f"For {period}, {'; '.join(summaries)}. Being below budget is not automatically good or bad; it may mean planned work has not happened yet.",
+                list(dict.fromkeys(evidence)),
+                [f"employee:{row['id']}" for row in rows],
+                {"period": period, "budget_count": len(rows), "employees": calculations,
+                 "over_budget_count": sum(1 for item in calculations if item["status"] == "over budget")},
+            )
+
+        if any(phrase in text for phrase in (
+                "revenue", "sales trend", "income trend", "revenue trend",
+                "revenue increasing", "revenue growing")):
+            income_rows = conn.execute(
+                """SELECT substr(occurred_on, 1, 7) AS period, currency,
+                          SUM(amount_cents) AS total, COUNT(*) AS count
+                   FROM transactions
+                   WHERE workspace_id=? AND kind='income'
+                   GROUP BY substr(occurred_on, 1, 7), currency
+                   ORDER BY period DESC, currency""",
+                (workspace_id,),
+            ).fetchall()
+            if not income_rows:
+                return ChatResult(
+                    "I cannot calculate a revenue trend yet because no loaded transactions are marked as income.",
+                    [], [], {"status": "unknown", "income_periods": 0},
+                )
+            by_currency: dict[str, list[sqlite3.Row]] = {}
+            for row in income_rows:
+                by_currency.setdefault(row["currency"], []).append(row)
+            parts = []
+            trends = {}
+            for currency, values in sorted(by_currency.items()):
+                latest = values[0]
+                previous = values[1] if len(values) > 1 else None
+                if previous and previous["total"]:
+                    change = round((latest["total"] - previous["total"]) / abs(previous["total"]) * 100, 1)
+                    direction = "up" if change > 0 else ("down" if change < 0 else "unchanged")
+                    parts.append(
+                        f"{currency} revenue is {direction} {abs(change):g}%: "
+                        f"{format_money(latest['total'], currency)} in {latest['period']} versus "
+                        f"{format_money(previous['total'], currency)} in {previous['period']}"
+                    )
+                else:
+                    change = None
+                    parts.append(
+                        f"{currency} revenue is {format_money(latest['total'], currency)} in {latest['period']}; I need another month to calculate a trend"
+                    )
+                trends[currency] = {"latest_period": latest["period"],
+                                    "latest_cents": latest["total"],
+                                    "previous_period": previous["period"] if previous else None,
+                                    "previous_cents": previous["total"] if previous else None,
+                                    "change_percent": change}
+            return ChatResult(
+                f"From transactions explicitly marked as income, {'; '.join(parts)}. This is recorded income, not an audited profit figure.",
+                [f"workspace:{workspace_id}:transactions"], [f"workspace:{workspace_id}"],
+                {"revenue_by_currency": trends},
+            )
+
+        if text in {"hi", "hello", "hey", "good morning", "good afternoon", "good evening"}:
+            return ChatResult(
+                "Hi. I can show what came in or went out, find the latest transaction, compare employee spending with budgets, explain review items, or trace a number back to its source. What would you like to check?",
+                [], [], {"intent": "greeting"},
+            )
+
+        if any(phrase in text for phrase in (
+                "what can you do", "how can you help", "help me", "what should i ask")):
+            return ChatResult(
+                "You can ask me things like: What was the last transaction? Who is over budget? Is revenue increasing? What needs review? Why was this flagged? Or where could we spend less? I will use only this company's saved records and say when the answer is unknown.",
+                [], [], {"intent": "help"},
+            )
+
+        if "document" in text and any(word in text for word in (
+                "list", "show", "paperwork", "loaded", "intake")):
+            documents = conn.execute(
+                """SELECT d.id, d.filename, d.document_type, d.source_id,
+                          d.status, d.is_synthetic, e.id AS expense_id,
+                          e.approval_status, e.receipt_status
+                   FROM intake_documents d
+                   LEFT JOIN expense_reports e
+                     ON e.workspace_id=d.workspace_id AND e.source_id=d.source_id
+                   WHERE d.workspace_id=? ORDER BY d.filename""",
+                (workspace_id,),
+            ).fetchall()
+            if not documents:
+                return ChatResult(
+                    "I found no intake documents in the active company.", [], [],
+                    {"document_count": 0},
+                )
+            descriptions = "; ".join(
+                f"{row['filename']} ({str(row['document_type']).replace('_', ' ')}, "
+                f"approval {row['approval_status'] or 'unknown'}, receipt {row['receipt_status'] or 'unknown'})"
+                for row in documents[:12]
+            )
+            return ChatResult(
+                f"I found {len(documents)} intake document(s): {descriptions}. "
+                "Synthetic demo paperwork is labeled as synthetic, and review labels are not fraud conclusions.",
+                [row["source_id"] for row in documents],
+                [f"document:{row['id']}" for row in documents[:8]],
+                {"document_count": len(documents),
+                 "synthetic_count": sum(1 for row in documents if row["is_synthetic"])},
+            )
+
+        if any(phrase in text for phrase in (
+                "outside research", "web research", "tavily", "found online",
+                "online research")):
+            web_rows = conn.execute(
+                """SELECT id, title, url, source_label, retrieved_at
+                   FROM web_evidence WHERE workspace_id=?
+                   ORDER BY retrieved_at DESC, id LIMIT 8""",
+                (workspace_id,),
+            ).fetchall()
+            if not web_rows:
+                return ChatResult(
+                    "I found no saved outside-web research for this company. Tavily research is optional and is never run by automatic refresh.",
+                    [], [], {"web_evidence_count": 0, "status": "unknown"},
+                )
+            leads = "; ".join(
+                f"{row['title']} ({urllib.parse.urlsplit(row['url']).hostname})"
+                for row in web_rows
+            )
+            return ChatResult(
+                f"I found {len(web_rows)} saved outside-research lead(s): {leads}. "
+                "They are unverified leads, not proof, and they do not close a finding. Open each source and confirm it against an authoritative record.",
+                [row["id"] for row in web_rows],
+                [f"web:{row['id']}" for row in web_rows],
+                {"web_evidence_count": len(web_rows), "verified": False},
+            )
+
         if any(term in text for term in ("cut spending", "spend less", "overspending", "save money", "possible cuts")):
             rows = conn.execute(
                 """SELECT * FROM transactions
@@ -1900,7 +2499,12 @@ def answer_question(question: str, workspace_id: str = "business", selected_id: 
                                "baseline_days": 90, "recent_count": count,
                                "currency": currency},
             )
-        if "what changed" in text or "why" in text and ("flag" in text or "held" in text or selected_id):
+        route_selected = selected_id in {
+            "invoice:INV-1007", "vendor:northstar", "destination:****7284",
+            "destination:****9142",
+        }
+        if "what changed" in text or "why" in text and (
+                "flag" in text or "held" in text or route_selected):
             finding = conn.execute("SELECT * FROM findings WHERE workspace_id=? AND kind='destination_change'", (workspace_id,)).fetchone()
             if finding:
                 evidence = json.loads(finding["evidence_ids"])
@@ -2100,7 +2704,66 @@ def answer_question(question: str, workspace_id: str = "business", selected_id: 
                 return ChatResult("I found no matching transactions in the active workspace.", [], [])
             listing = "; ".join(f"{row['id']} {row['merchant_raw']} {format_money(row['amount_cents'], row['currency'])}" for row in rows)
             return ChatResult(f"The largest matching transactions are: {listing}.", [row["source_id"] for row in rows], [f"transaction:{row['id']}" for row in rows], {"threshold_cents": threshold, "count_shown": len(rows)})
-        if "receipt" in text:
+        employee_names = conn.execute(
+            "SELECT id, name FROM employees WHERE workspace_id=? ORDER BY name",
+            (workspace_id,),
+        ).fetchall()
+        named_employee = next(
+            (employee for employee in employee_names
+             if employee["name"].lower() in text
+             or (len(employee["name"].split()[0]) >= 3
+                 and employee["name"].split()[0].lower() in text)),
+            None,
+        )
+        if named_employee:
+            rows = conn.execute(
+                """SELECT * FROM expense_reports
+                   WHERE workspace_id=? AND employee_id=? ORDER BY spent_on DESC, id""",
+                (workspace_id, named_employee["id"]),
+            ).fetchall()
+            totals = _currency_totals(rows, amount_key="amount_cents")
+            review_rows = [
+                row for row in rows
+                if row["approval_status"] == "needs_review" or row["receipt_status"] == "missing"
+            ]
+            budget = conn.execute(
+                """SELECT * FROM employee_budgets
+                   WHERE workspace_id=? AND employee_id=? ORDER BY period DESC LIMIT 1""",
+                (workspace_id, named_employee["id"]),
+            ).fetchone()
+            budget_sentence = "No monthly budget is saved."
+            budget_calculation = None
+            evidence = [row["source_id"] for row in rows]
+            if budget:
+                period_spend = sum(
+                    row["amount_cents"] for row in rows
+                    if row["spent_on"].startswith(budget["period"])
+                    and row["currency"] == budget["currency"]
+                )
+                percent = round(period_spend / budget["budget_cents"] * 100) if budget["budget_cents"] else None
+                state = "over budget" if period_spend > budget["budget_cents"] else "within budget"
+                budget_sentence = (
+                    f"For {budget['period']}, {format_money(period_spend, budget['currency'])} "
+                    f"of {format_money(budget['budget_cents'], budget['currency'])} is used "
+                    f"({percent}%); that is {state}."
+                )
+                budget_calculation = {
+                    "period": budget["period"], "spent_cents": period_spend,
+                    "budget_cents": budget["budget_cents"], "currency": budget["currency"],
+                    "percent_used": percent, "status": state,
+                }
+                evidence.append(budget["source_id"])
+            return ChatResult(
+                f"{named_employee['name']} has {len(rows)} expense report(s) totaling "
+                f"{_currency_totals_label(totals)}. {len(review_rows)} need review. "
+                f"{budget_sentence}",
+                list(dict.fromkeys(evidence)),
+                [f"employee:{named_employee['id']}"] + [f"expense:{row['id']}" for row in rows[:6]],
+                {"employee_id": named_employee["id"], "employee_name": named_employee["name"],
+                 "report_count": len(rows), "needs_review": len(review_rows),
+                 "totals_by_currency": totals, "budget": budget_calculation},
+            )
+        if "receipt" in text and not any(term in text for term in ("employee", "staff", "expense report", "people")):
             rows = conn.execute("SELECT * FROM receipts WHERE workspace_id=? AND transaction_id IS NULL", (workspace_id,)).fetchall()
             return ChatResult(
                 f"I found {len(rows)} receipt record(s) without a linked transaction. They remain unmatched; PayProof did not invent a match.",
@@ -2204,19 +2867,35 @@ def answer_question(question: str, workspace_id: str = "business", selected_id: 
                 f"The active workspace contains {counts['vendors']} vendors, {counts['transactions']} transactions, {counts['invoices']} invoices, {counts['receipts']} receipts, and {counts['findings']} findings.",
                 [f"workspace:{workspace_id}"], [f"workspace:{workspace_id}"], counts,
             )
-        if selected_id:
+        if selected_id and selected_id.startswith("web:"):
+            record = get_record(selected_id, workspace_id)
+            if record:
+                return ChatResult(
+                    f"This is an unverified outside-research lead titled {record['title']}. "
+                    f"It was saved from {urllib.parse.urlsplit(record['url']).hostname} on "
+                    f"{record['retrieved_at']}. Open the original page and confirm it against "
+                    "an authoritative record before relying on it; this lead does not close a finding.",
+                    [record["id"]], [selected_id],
+                    {"status": "unverified", "verified": False},
+                )
+        selected_reference = any(phrase in text for phrase in (
+            "this item", "this record", "selected item", "selected record",
+            "tell me more about it", "what about it", "show its details",
+            "show the details", "open it",
+        ))
+        if selected_id and selected_reference:
             record = get_record(selected_id, workspace_id)
             if record:
                 safe = {key: value for key, value in record.items() if "hash" not in key}
                 return ChatResult(f"Here is the loaded evidence for {selected_id}: {json.dumps(safe, default=str)}", [record.get("source_id", selected_id)], [selected_id])
-    if workspace_id == "business":
+    if security_language:
         return ChatResult(
-            "Unknown. The loaded evidence does not support that security claim. Please provide the relevant policy, system export, audit report, or a named control owner who can answer a targeted follow-up.",
-            [], [selected_id] if selected_id else [], {"status": "unknown", "evidence_count": 0},
+            "Unknown. The loaded evidence does not support that security or compliance claim. Add the relevant policy, certificate, audit report, system export, or a named control owner before relying on an answer.",
+            [], [], {"status": "unknown", "evidence_count": 0},
         )
     return ChatResult(
-        "I cannot answer that from the loaded evidence yet. Try asking about Amazon, receipts, largest purchases, or possible spending cuts.",
-        [], [selected_id] if selected_id else [],
+        "I cannot answer that from this company's saved records yet. Try asking about the latest transaction, money in and out, employee budgets, review items, Amazon purchases, or possible spending cuts. If the information is missing, connect the right bank, email, or intake folder.",
+        [], [], {"status": "unknown", "evidence_count": 0},
     )
 
 
@@ -3717,6 +4396,243 @@ def _gmail_evidence_row_id(workspace_id: str, message_id: str) -> str:
     return f"GMAIL-{workspace_id.upper()}-{digest}"
 
 
+def _bounded_web_text(value: Any, field: str, maximum: int, *,
+                      multiline: bool = False) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"Web evidence {field} must be text")
+    if not 1 <= len(value) <= maximum:
+        raise ValueError(
+            f"Web evidence {field} must be between 1 and {maximum:,} characters"
+        )
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"Web evidence {field} cannot be blank")
+    allowed_controls = {"\t", "\r", "\n"} if multiline else set()
+    if any((ord(character) < 32 or ord(character) == 127)
+           and character not in allowed_controls for character in cleaned):
+        raise ValueError(f"Web evidence {field} contains unsupported control characters")
+    return cleaned
+
+
+def _canonical_web_url(value: Any) -> str:
+    url = _bounded_web_text(value, "url", MAX_WEB_EVIDENCE_URL_CHARS)
+    if any(character.isspace() for character in url) or "\\" in url:
+        raise ValueError("Web evidence url must not contain whitespace or backslashes")
+    if re.search(r"%(?![0-9a-fA-F]{2})", url):
+        raise ValueError("Web evidence url contains an invalid percent escape")
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("Web evidence url must be a valid absolute http or https URL") from exc
+
+    scheme = parsed.scheme.casefold()
+    if scheme not in {"http", "https"} or not parsed.netloc or not hostname:
+        raise ValueError("Web evidence url must be a valid absolute http or https URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Web evidence url cannot contain embedded credentials")
+    if port not in {None, 80, 443}:
+        raise ValueError("Web evidence url may use only standard web ports")
+    try:
+        query_fields = urllib.parse.parse_qsl(
+            parsed.query, keep_blank_values=True, max_num_fields=100,
+        )
+    except ValueError as exc:
+        raise ValueError("Web evidence url query is invalid or too large") from exc
+    secret_query_names = {
+        "token", "access_token", "refresh_token", "api_key", "key", "secret",
+        "password", "passwd", "authorization", "client_secret", "signature",
+        "sig", "auth", "code", "credential", "credentials",
+    }
+    for supplied_name, _ in query_fields:
+        name = re.sub(r"[^a-z0-9]+", "_", supplied_name.casefold()).strip("_")
+        if (name in secret_query_names or name.endswith("_token")
+                or name.endswith("_secret") or name.endswith("_signature")
+                or name.endswith("_credential") or name.endswith("_credentials")):
+            raise ValueError("Web evidence url cannot contain credentials in its query")
+
+    raw_hostname = hostname.rstrip(".").casefold()
+    if not raw_hostname:
+        raise ValueError("Web evidence url must include a hostname")
+    if raw_hostname == "localhost" or raw_hostname.endswith((".localhost", ".local")):
+        raise ValueError("Web evidence url cannot target a local hostname")
+
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
+    try:
+        address = ipaddress.ip_address(raw_hostname)
+    except ValueError:
+        # Reject alternate numeric IP spellings (for example 127.1 or an
+        # integer-form IPv4 address) rather than letting a resolver reinterpret
+        # one as a local address later.
+        if (re.fullmatch(r"[0-9.]+", raw_hostname)
+                or re.fullmatch(r"(?:0x[0-9a-f]+|[0-9]+)", raw_hostname)):
+            raise ValueError("Web evidence url contains an invalid IP address")
+        if ":" in raw_hostname:
+            raise ValueError("Web evidence url contains an invalid IP address")
+    if address is not None:
+        if (not address.is_global or address.is_private or address.is_loopback
+                or address.is_link_local or address.is_reserved
+                or address.is_unspecified or address.is_multicast):
+            raise ValueError("Web evidence url cannot target a non-public IP address")
+        canonical_hostname = address.compressed.casefold()
+        if isinstance(address, ipaddress.IPv6Address):
+            canonical_hostname = f"[{canonical_hostname}]"
+    else:
+        try:
+            canonical_hostname = raw_hostname.encode("idna").decode("ascii").casefold()
+        except UnicodeError as exc:
+            raise ValueError("Web evidence url contains an invalid hostname") from exc
+        labels = canonical_hostname.split(".")
+        reserved_suffixes = (
+            ".internal", ".lan", ".home", ".corp", ".test", ".invalid",
+            ".localhost", ".onion",
+        )
+        if (len(labels) < 2 or canonical_hostname.endswith(reserved_suffixes)
+                or len(canonical_hostname) > 253
+                or any(not label or len(label) > 63
+                       or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+                       for label in labels)):
+            raise ValueError("Web evidence url contains an invalid hostname")
+
+    default_port = 80 if scheme == "http" else 443
+    netloc = canonical_hostname
+    if port is not None and port != default_port:
+        netloc = f"{netloc}:{port}"
+
+    def canonical_component(component: str, safe: str) -> str:
+        encoded = urllib.parse.quote(component, safe=safe + "%")
+        return re.sub(
+            r"%[0-9a-fA-F]{2}", lambda match: match.group(0).upper(), encoded,
+        )
+
+    path = canonical_component(parsed.path or "/", "/:@!$&'()*+,;=-._~")
+    query = canonical_component(parsed.query, "/?:@!$&'()*+,;=-._~")
+    canonical = urllib.parse.urlunsplit((scheme, netloc, path, query, ""))
+    if len(canonical) > MAX_WEB_EVIDENCE_URL_CHARS:
+        raise ValueError(
+            f"Web evidence url must be no more than {MAX_WEB_EVIDENCE_URL_CHARS:,} characters"
+        )
+    return canonical
+
+
+def _web_retrieved_at(value: str | datetime | None) -> str:
+    if value is None:
+        return utc_now()
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat(timespec="seconds")
+    timestamp = _bounded_web_text(value, "retrieved_at", 100)
+    try:
+        datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("Web evidence retrieved_at must be an ISO-8601 timestamp") from exc
+    return timestamp
+
+
+def _web_evidence_row_id(workspace_id: str, canonical_url: str,
+                         content_hash: str) -> str:
+    digest = hashlib.sha256(
+        f"{canonical_url}\0{content_hash}".encode("utf-8")
+    ).hexdigest()[:32].upper()
+    return f"WEB-{workspace_id.upper()}-{digest}"
+
+
+def import_web_evidence(
+    items: list[dict[str, Any]],
+    workspace_id: str,
+    source_label: str = "Tavily web search · unverified",
+    query: str = "",
+    retrieved_at: str | datetime | None = None,
+) -> dict[str, Any]:
+    """Store a bounded batch of untrusted public-web search evidence."""
+    workspace_id = require_workspace(workspace_id)
+    if not isinstance(items, list):
+        raise ValueError("Web evidence items must be a list")
+    if not 1 <= len(items) <= MAX_WEB_EVIDENCE_ITEMS:
+        raise ValueError(
+            f"Web evidence requires between 1 and {MAX_WEB_EVIDENCE_ITEMS} items"
+        )
+    label = _bounded_web_text(
+        source_label, "source_label", MAX_WEB_EVIDENCE_SOURCE_LABEL_CHARS,
+    )
+    if not isinstance(query, str):
+        raise ValueError("Web evidence query must be text")
+    if len(query) > MAX_WEB_EVIDENCE_QUERY_CHARS:
+        raise ValueError(
+            f"Web evidence query must be no more than {MAX_WEB_EVIDENCE_QUERY_CHARS} characters"
+        )
+    normalized_query = query.strip()
+    if any(ord(character) < 32 or ord(character) == 127
+           for character in normalized_query):
+        raise ValueError("Web evidence query contains unsupported control characters")
+    timestamp = _web_retrieved_at(retrieved_at)
+
+    validated: list[dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"Web evidence item {index} must be an object")
+        title = _bounded_web_text(
+            item.get("title"), "title", MAX_WEB_EVIDENCE_TITLE_CHARS,
+        )
+        content = _bounded_web_text(
+            item.get("content"), "content", MAX_WEB_EVIDENCE_CONTENT_CHARS,
+            multiline=True,
+        )
+        canonical_url = _canonical_web_url(item.get("url"))
+        raw_score = item.get("score")
+        if raw_score is None:
+            score = None
+        elif isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+            raise ValueError(f"Web evidence item {index} score must be a number")
+        else:
+            score = float(raw_score)
+            if not math.isfinite(score) or not 0 <= score <= 1:
+                raise ValueError(
+                    f"Web evidence item {index} score must be between 0 and 1"
+                )
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        validated.append({
+            "id": _web_evidence_row_id(workspace_id, canonical_url, content_hash),
+            "title": title,
+            "url": canonical_url,
+            "content": content,
+            "score": score,
+            "content_hash": content_hash,
+        })
+
+    batch_id = uuid.uuid4().hex
+    source_id = f"web:{batch_id}"
+    imported_at = utc_now()
+    accepted = skipped = 0
+    record_ids: list[str] = []
+    with closing(_connect()) as conn:
+        for item in validated:
+            result = conn.execute(
+                """INSERT OR IGNORE INTO web_evidence(
+                       id, workspace_id, batch_id, source_id, title, url, content,
+                       score, source_label, query, retrieved_at, is_untrusted,
+                       content_hash, imported_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                (item["id"], workspace_id, batch_id, source_id, item["title"],
+                 item["url"], item["content"], item["score"], label,
+                 normalized_query, timestamp, item["content_hash"], imported_at),
+            )
+            accepted += result.rowcount
+            skipped += 1 - result.rowcount
+            if result.rowcount:
+                record_ids.append(item["id"])
+        conn.commit()
+    return {
+        "accepted": accepted,
+        "skipped": skipped,
+        "batch_id": batch_id if accepted else None,
+        "source_id": source_id if accepted else None,
+        "record_ids": record_ids,
+    }
+
+
 def import_gmail_metadata(messages: list[dict[str, Any]], workspace_id: str = "personal") -> dict[str, int]:
     """Store minimal Gmail metadata and snippets locally; never stores attachments or full bodies."""
     workspace_id = require_workspace(workspace_id)
@@ -3765,6 +4681,16 @@ def list_import_sources(workspace_id: str) -> list[dict[str, Any]]:
     with closing(_connect()) as conn:
         imports = _rows(conn, "SELECT id, filename, accepted, rejected, created_at FROM imports WHERE workspace_id=? ORDER BY created_at DESC", (workspace_id,))
         gmail_count = conn.execute("SELECT COUNT(*) FROM email_evidence WHERE workspace_id=? AND provider='gmail'", (workspace_id,)).fetchone()[0]
+        web_batches = _rows(
+            conn,
+            """SELECT batch_id, source_id, source_label, query, retrieved_at,
+                      MIN(imported_at) AS created_at, COUNT(*) AS record_count
+               FROM web_evidence
+               WHERE workspace_id=?
+               GROUP BY batch_id, source_id, source_label, query, retrieved_at
+               ORDER BY created_at DESC, batch_id DESC""",
+            (workspace_id,),
+        )
         bank_import_ids = {
             row[0] for row in conn.execute(
                 "SELECT DISTINCT import_id FROM bank_transactions WHERE workspace_id=? AND import_id IS NOT NULL",
@@ -3780,6 +4706,19 @@ def list_import_sources(workspace_id: str) -> list[dict[str, Any]]:
         else:
             kind = "csv"
         sources.append({**item, "kind": kind, "label": item["filename"], "record_count": item["accepted"]})
+    sources[0:0] = [
+        {
+            "id": item["source_id"],
+            "batch_id": item["batch_id"],
+            "kind": "web",
+            "label": item["source_label"],
+            "record_count": item["record_count"],
+            "query": item["query"],
+            "retrieved_at": item["retrieved_at"],
+            "created_at": item["created_at"],
+        }
+        for item in web_batches
+    ]
     if gmail_count:
         sources.insert(0, {"id": "gmail", "kind": "gmail", "label": "Gmail · read-only metadata", "record_count": gmail_count})
     return sources
@@ -3788,6 +4727,29 @@ def list_import_sources(workspace_id: str) -> list[dict[str, Any]]:
 def preview_source_removal(workspace_id: str, source_id: str) -> dict[str, Any]:
     workspace_id = require_workspace(workspace_id)
     with closing(_connect()) as conn:
+        if source_id.startswith("web:"):
+            web_batch = conn.execute(
+                """SELECT batch_id, source_label, query, retrieved_at,
+                          COUNT(*) AS record_count
+                   FROM web_evidence
+                   WHERE workspace_id=? AND source_id=?
+                   GROUP BY batch_id, source_label, query, retrieved_at""",
+                (workspace_id, source_id),
+            ).fetchone()
+            if not web_batch:
+                raise ValueError("Web evidence source not found")
+            return {
+                "source_id": source_id,
+                "batch_id": web_batch["batch_id"],
+                "kind": "web",
+                "label": web_batch["source_label"],
+                "query": web_batch["query"],
+                "retrieved_at": web_batch["retrieved_at"],
+                "affected": {"web_evidence": web_batch["record_count"]},
+                "local_records_only": True,
+                "upstream_data_deleted": False,
+                "oauth_connection_changed": False,
+            }
         if source_id == "gmail":
             affected = {
                 "email_evidence": conn.execute(
@@ -3835,6 +4797,28 @@ def remove_source(workspace_id: str, source_id: str, confirmed: bool = False) ->
         raise ValueError("Preview the affected records and explicitly confirm removal first")
     workspace_id = require_workspace(workspace_id)
     with closing(_connect()) as conn:
+        if source_id.startswith("web:"):
+            batch = conn.execute(
+                """SELECT batch_id FROM web_evidence
+                   WHERE workspace_id=? AND source_id=? LIMIT 1""",
+                (workspace_id, source_id),
+            ).fetchone()
+            if not batch:
+                raise ValueError("Web evidence source not found")
+            count = conn.execute(
+                "DELETE FROM web_evidence WHERE workspace_id=? AND source_id=?",
+                (workspace_id, source_id),
+            ).rowcount
+            conn.commit()
+            return {
+                "removed": count,
+                "source_id": source_id,
+                "batch_id": batch["batch_id"],
+                "kind": "web",
+                "local_records_only": True,
+                "upstream_data_deleted": False,
+                "oauth_connection_changed": False,
+            }
         if source_id == "gmail":
             count = conn.execute("DELETE FROM email_evidence WHERE workspace_id=? AND provider='gmail'", (workspace_id,)).rowcount
             conn.commit()
@@ -3918,13 +4902,21 @@ def send_prism_trace(question: str, result: ChatResult, session_id: str, latency
     api_key = os.getenv("PRISMTRACE_API_KEY")
     host = os.getenv("PRISMTRACE_HOST", "https://prism.blockconvey.com").rstrip("/")
     trace_id = str(uuid.uuid4())
+    try:
+        with closing(_connect()) as connection:
+            workspace_row = connection.execute(
+                "SELECT is_demo FROM workspaces WHERE id=?", (workspace_id,),
+            ).fetchone()
+        synthetic_demo = bool(workspace_row and workspace_row["is_demo"])
+    except sqlite3.Error:
+        synthetic_demo = False
     payload = {
         "project_id": project_id, "model": "payproof-deterministic-fallback",
         "input_messages": [{"role": "user", "content": question}], "output_message": result.answer,
         "latency_ms": latency_ms, "session_id": session_id, "trace_id": trace_id,
         "agent_id": "payproof-atlas", "agent_name": "Ask PayProof",
         "metadata": {"workspace": workspace_id, "evidence_ids": result.evidence_ids,
-                     "engine": "deterministic-fallback", "synthetic_demo": True},
+                     "engine": "deterministic-fallback", "synthetic_demo": synthetic_demo},
     }
     if not project_id or not api_key:
         return {"state": "not_configured", "trace_id": trace_id}
