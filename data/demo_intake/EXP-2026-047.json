@@ -1,0 +1,21 @@
+{
+  "id": "EXP-2026-047",
+  "document_type": "employee_expense_report",
+  "employee": "Alex Morgan",
+  "department": "Marketing",
+  "office": "Chicago",
+  "merchant": "GiftCard Hub",
+  "amount": "1200.00",
+  "currency": "USD",
+  "date": "2026-09-04",
+  "category": "Gift cards",
+  "purpose": "Team recognition",
+  "receipt_status": "missing",
+  "approval_status": "needs_review",
+  "demo_review_label": "Possible fraud - review only",
+  "demo_review_signals": [
+    "A high-value gift-card purchase can be difficult to trace.",
+    "The receipt and recipient list are missing.",
+    "A manager should verify the business purpose before approval."
+  ]
+}

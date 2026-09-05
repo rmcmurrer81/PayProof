@@ -1,0 +1,20 @@
+{
+  "id": "EXP-2026-046",
+  "document_type": "employee_expense_report",
+  "employee": "Jordan Alvarez",
+  "department": "Operations",
+  "office": "Austin",
+  "merchant": "Rapid Office Supply",
+  "amount": "247.83",
+  "currency": "USD",
+  "date": "2026-08-25",
+  "category": "Office supplies",
+  "purpose": "New-hire desk setup",
+  "receipt_status": "submitted",
+  "approval_status": "needs_review",
+  "demo_review_label": "Possible duplicate - review only",
+  "demo_review_signals": [
+    "The employee, amount, date, category, and purpose match EXP-2026-042.",
+    "The merchant wording differs, so PayProof does not call it a duplicate automatically."
+  ]
+}

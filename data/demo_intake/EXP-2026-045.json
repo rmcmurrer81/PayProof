@@ -1,0 +1,21 @@
+{
+  "id": "EXP-2026-045",
+  "document_type": "employee_expense_report",
+  "employee": "Maya Chen",
+  "department": "Sales",
+  "office": "New York",
+  "merchant": "Northstar Executive Suites",
+  "amount": "1875.00",
+  "currency": "USD",
+  "date": "2026-09-03",
+  "category": "Meals and events",
+  "purpose": "Vendor planning dinner",
+  "receipt_status": "missing",
+  "approval_status": "needs_review",
+  "demo_review_label": "Possible fraud - review only",
+  "demo_review_signals": [
+    "The receipt is missing.",
+    "The amount is high for a meal claim.",
+    "The purpose does not name the attendees."
+  ]
+}

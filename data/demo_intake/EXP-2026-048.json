@@ -1,0 +1,21 @@
+{
+  "id": "EXP-2026-048",
+  "document_type": "employee_expense_report",
+  "employee": "Priya Shah",
+  "department": "Customer Success",
+  "office": "Chicago",
+  "merchant": "CloudScale Software",
+  "amount": "2400.00",
+  "currency": "USD",
+  "date": "2026-09-04",
+  "category": "Software",
+  "purpose": "Annual collaboration subscription",
+  "receipt_status": "submitted",
+  "approval_status": "needs_review",
+  "demo_review_label": "Policy exception - review only",
+  "demo_review_signals": [
+    "The annual commitment has not been approved.",
+    "The paperwork does not identify the contract owner.",
+    "The charge should be checked for an existing company subscription."
+  ]
+}
