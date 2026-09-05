@@ -16,13 +16,14 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 
 from src import secure_credentials
 
 from src.core import (
     PROJECT_ROOT,
     add_intake_folder,
+    archive_company_workspace,
     answer_question,
     bank_connector_status,
     commit_bank_statement_preview,
@@ -33,6 +34,7 @@ from src.core import (
     explain_with_runtime_model,
     exchange_plaid_public_token,
     get_dashboard,
+    get_company_logo_path,
     get_record,
     get_reconciliation_summary,
     import_transactions_csv,
@@ -53,12 +55,16 @@ from src.core import (
     record_chat_turn,
     remove_source,
     remove_intake_folder,
+    remove_company_logo,
     rename_company_workspace,
     reset_synthetic_demo_state,
+    restore_company_workspace,
     scan_intake_folder,
+    save_company_logo,
     send_prism_trace,
     sync_plaid_transactions,
     update_intake_folder,
+    update_company_workspace,
     preview_bank_statement,
 )
 
@@ -107,7 +113,8 @@ def dashboard():
 
 @app.get("/api/workspaces")
 def workspaces_list():
-    return jsonify({"workspaces": list_workspaces()})
+    include_archived = request.args.get("include_archived", "false").lower() == "true"
+    return jsonify({"workspaces": list_workspaces(include_archived=include_archived)})
 
 
 @app.post("/api/workspaces")
@@ -116,18 +123,83 @@ def workspace_create():
     if not isinstance(payload, dict):
         return jsonify({"error": "A JSON object is required"}), 400
     try:
-        return jsonify(create_company_workspace(str(payload.get("name") or ""))), 201
+        return jsonify(create_company_workspace(
+            str(payload.get("name") or ""), payload.get("website"),
+        )), 201
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
 
 @app.patch("/api/workspaces/<workspace_id>")
-def workspace_rename(workspace_id: str):
+def workspace_update(workspace_id: str):
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"error": "A JSON object is required"}), 400
     try:
-        return jsonify(rename_company_workspace(workspace_id, str(payload.get("name") or "")))
+        return jsonify(update_company_workspace(workspace_id, payload))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.delete("/api/workspaces/<workspace_id>")
+def workspace_archive(workspace_id: str):
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(archive_company_workspace(
+            workspace_id,
+            confirmed=payload.get("confirm") is True,
+            expected_name=str(payload.get("company_name") or ""),
+        ))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/workspaces/<workspace_id>/restore")
+def workspace_restore(workspace_id: str):
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(restore_company_workspace(
+            workspace_id, confirmed=payload.get("confirm") is True,
+        ))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.get("/api/workspaces/<workspace_id>/logo")
+def workspace_logo_get(workspace_id: str):
+    try:
+        logo_path, mime_type = get_company_logo_path(workspace_id)
+        response = send_file(logo_path, mimetype=mime_type, conditional=False)
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+@app.post("/api/workspaces/<workspace_id>/logo")
+def workspace_logo_upload(workspace_id: str):
+    uploaded = request.files.get("logo")
+    if not uploaded:
+        return jsonify({"error": "Choose a PNG, JPEG, or WebP logo"}), 400
+    # Read one byte beyond the limit so oversized payloads fail without being
+    # written to disk. The core validates the content signature again.
+    content = uploaded.read((2 * 1024 * 1024) + 1)
+    try:
+        return jsonify(save_company_logo(
+            workspace_id, uploaded.filename or "logo", content,
+        ))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.delete("/api/workspaces/<workspace_id>/logo")
+def workspace_logo_delete(workspace_id: str):
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(remove_company_logo(
+            workspace_id, confirmed=payload.get("confirm") is True,
+        ))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -155,7 +227,9 @@ def chat():
         return jsonify({"error": str(exc)}), 400
     selected_id = payload.get("selected_id")
     started = time.perf_counter()
-    result = answer_question(question, workspace, selected_id, payload.get("filters"))
+    result = answer_question(
+        question, workspace, selected_id, payload.get("filters"), session_id=session_id,
+    )
     result, model_status = explain_with_runtime_model(question, result)
     latency = round((time.perf_counter() - started) * 1000)
     trace = send_prism_trace(question, result, session_id, latency, workspace)

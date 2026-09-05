@@ -89,11 +89,11 @@ class IsolatedApplication:
 
 
 _SECRET_PATTERNS = (
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),
     re.compile(
         r"(?i)\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|"
         r"client[_ -]?secret|password|secret)\b\s*[:=]\s*([^\s,;]+)"
     ),
-    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),
 )
 
 
@@ -229,15 +229,26 @@ class ConversationEvaluator:
         expected = self._database_row(
             """SELECT
                    COALESCE(SUM(CASE WHEN kind='income' THEN amount_cents ELSE 0 END), 0),
-                   COALESCE(SUM(CASE WHEN kind NOT IN ('income', 'refund') AND amount_cents>0
+                   COALESCE(SUM(CASE WHEN kind IN ('payment', 'purchase', 'expense', 'debit')
+                                          AND amount_cents>0
                                      THEN amount_cents ELSE 0 END), 0)
                FROM transactions WHERE workspace_id='business'"""
         )
+        unknown_directions = self._database_row(
+            """SELECT COUNT(*) FROM transactions
+               WHERE workspace_id='business'
+                 AND kind NOT IN ('income', 'payment', 'purchase', 'expense', 'debit', 'refund')"""
+        )[0]
         expected_calculation = {
             "money_in_cents": int(expected[0]),
             "money_out_cents": int(expected[1]),
             "net_cash_cents": int(expected[0]) - int(expected[1]),
+            "money_in_by_currency": {"USD": int(expected[0])},
+            "money_out_by_currency": {"USD": int(expected[1])},
+            "net_cash_by_currency": {"USD": int(expected[0]) - int(expected[1])},
             "currency": "USD",
+            "source_basis": "loaded transaction ledger",
+            "unknown_direction_excluded": int(unknown_directions),
         }
         first = self.ask(
             "finance.money_flow_first", "business", session_id,
@@ -267,7 +278,11 @@ class ConversationEvaluator:
             rows = connection.execute(
                 "SELECT * FROM transactions WHERE workspace_id='personal' ORDER BY occurred_on"
             ).fetchall()
-        amazon_rows = [row for row in rows if core.normalize_merchant(row["merchant_raw"]) == "amazon"]
+        amazon_rows = [
+            row for row in rows
+            if core.normalize_merchant(row["merchant_raw"]) == "amazon"
+            and row["kind"] in {"purchase", "payment", "expense", "debit", "refund"}
+        ]
         expected_total = sum(int(row["amount_cents"]) for row in amazon_rows)
         amazon = self.ask(
             "spending.amazon_total", "personal", session_id,
@@ -288,17 +303,26 @@ class ConversationEvaluator:
             "Amazon aggregation should explain its treatment of refunds and credits",
         )
 
-        latest = max(datetime.strptime(row["occurred_on"], "%Y-%m-%d").date() for row in rows)
+        spend_rows = [
+            row for row in rows
+            if int(row["amount_cents"]) > 0
+            and row["kind"] in {"payment", "purchase", "expense", "debit"}
+        ]
+        amazon_spend_rows = [
+            row for row in spend_rows
+            if core.normalize_merchant(row["merchant_raw"]) == "amazon"
+        ]
+        latest = max(datetime.strptime(row["occurred_on"], "%Y-%m-%d").date() for row in spend_rows)
         recent_start = latest - timedelta(days=29)
         prior_start = recent_start - timedelta(days=90)
         expected_recent_amazon = sum(
             int(row["amount_cents"])
-            for row in amazon_rows
+            for row in amazon_spend_rows
             if datetime.strptime(row["occurred_on"], "%Y-%m-%d").date() >= recent_start
         )
         expected_prior_amazon = sum(
             int(row["amount_cents"])
-            for row in amazon_rows
+            for row in amazon_spend_rows
             if prior_start <= datetime.strptime(row["occurred_on"], "%Y-%m-%d").date() < recent_start
         )
         expected_baseline = round(expected_prior_amazon / 3)
@@ -453,7 +477,6 @@ class ConversationEvaluator:
         imported_rows = [
             row for row in (reconciliation.get("rows") or [])
             if row.get("bank_transaction", {}).get("provider") == "local_statement"
-            and "EVAL-LINK-001" in str(row.get("bank_transaction", {}).get("reference"))
         ]
         persisted_types = {
             match.get("type")
@@ -491,7 +514,9 @@ class ConversationEvaluator:
         )
         return employee_before, reconciliation
 
-    def evaluate_security_and_injection(self, session_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    def evaluate_security_and_injection(
+        self, session_id: str
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
         mfa = self.ask(
             "security.mfa_conflict", "business", session_id,
             "Is MFA enabled for every production identity?",
@@ -518,8 +543,20 @@ class ConversationEvaluator:
             "18" in str(mfa.get("answer", "")) and "16" in str(mfa.get("answer", "")),
             "the answer should surface both conflicting population and enrollment values",
         )
+        unassisted_follow_up = self.ask(
+            "security.mfa_follow_up_unassisted", "business", session_id, "Why?",
+        )
+        unassisted_relevant = (
+            bool(set(unassisted_follow_up.get("evidence_ids") or []) & set(evidence_ids))
+            and not str(unassisted_follow_up.get("answer", "")).startswith("Unknown.")
+        )
+        self.check(
+            "conversation.unassisted_history_follow_up",
+            unassisted_relevant,
+            "a bare same-session 'Why?' should recover the prior MFA focus and cite its evidence",
+        )
         follow_up = self.ask(
-            "security.mfa_follow_up", "business", session_id, "Why?",
+            "security.mfa_follow_up_assisted", "business", session_id, "Why?",
             selected_id="control:CTRL-MFA",
         )
         self.check(
@@ -563,7 +600,7 @@ class ConversationEvaluator:
             and tuple(before) == tuple(after),
             f"finding/audit state before={tuple(before)} and after={tuple(after)}",
         )
-        return mfa, follow_up, unknown
+        return mfa, unassisted_follow_up, follow_up, unknown
 
     def evaluate_correction(self, session_id: str, employee_before: dict[str, Any]) -> dict[str, Any]:
         correction_response = self.client.patch(
@@ -764,6 +801,7 @@ class ConversationEvaluator:
         first_money: dict[str, Any],
         repeated_money: dict[str, Any],
         mfa: dict[str, Any],
+        unassisted_follow_up: dict[str, Any],
         follow_up: dict[str, Any],
         unknown: dict[str, Any],
         employee_before: dict[str, Any],
@@ -787,18 +825,23 @@ class ConversationEvaluator:
             f"{len(readable)}/{len(successful_answers)} answers were concise sentences rather than raw data dumps.",
         ))
 
+        unassisted_evidence = set(unassisted_follow_up.get("evidence_ids") or [])
         follow_evidence = set(follow_up.get("evidence_ids") or [])
         mfa_evidence = set(mfa.get("evidence_ids") or [])
-        follow_conditions = sum((
+        unassisted_relevant = (
+            bool(unassisted_evidence & mfa_evidence)
+            and not str(unassisted_follow_up.get("answer", "")).startswith("Unknown.")
+        )
+        assisted_conditions = sum((
             bool(follow_evidence & mfa_evidence),
             follow_up.get("answer") != mfa.get("answer"),
             len(str(follow_up.get("answer", "")).split()) >= 5,
         ))
         self.result.rubric.append(RubricItem(
             "Follow-up relevance",
-            2 if follow_conditions == 3 else (1 if follow_conditions == 2 else 0),
+            2 if unassisted_relevant else (1 if assisted_conditions == 3 else 0),
             2,
-            "A terse 'Why?' was evaluated against selected-control context and citation continuity.",
+            "A bare same-session 'Why?' and a client-assisted selected-control follow-up were both evaluated.",
         ))
 
         consistent = (
@@ -806,13 +849,6 @@ class ConversationEvaluator:
             and first_money.get("calculation") == repeated_money.get("calculation")
             and first_money.get("evidence_ids") == repeated_money.get("evidence_ids")
         )
-        self.result.rubric.append(RubricItem(
-            "Factual consistency",
-            2 if consistent else 0,
-            2,
-            "An unchanged question was repeated in the same session and compared field-for-field.",
-        ))
-
         restraint_conditions = sum((
             str(unknown.get("answer", "")).startswith("Unknown."),
             (unknown.get("evidence_ids") or []) == [],
@@ -837,10 +873,28 @@ class ConversationEvaluator:
             < (employee_before.get("calculation") or {}).get("needs_review", -1)
         )
         self.result.rubric.append(RubricItem(
-            "State-change adaptation",
-            2 if adapted else 0,
+            "Consistency and state awareness",
+            2 if consistent and adapted else (1 if consistent or adapted else 0),
             2,
-            "The assistant was re-asked after an audited correction to detect stale narrative reuse.",
+            "An unchanged calculation was repeated, then an audited correction was used to detect stale narrative reuse.",
+        ))
+
+        actionable_answers = (
+            str(self.responses.get("spending.cut_itemized", {}).get("answer", "")),
+            str(self.responses.get("reconciliation.chat_summary", {}).get("answer", "")),
+            str(mfa.get("answer", "")),
+        )
+        bounded = all(8 <= len(answer.split()) <= 220 for answer in actionable_answers)
+        concrete_next_step = (
+            any(term in actionable_answers[0].lower() for term in ("meal budget", "purchase frequency"))
+            and "review" in actionable_answers[1].lower()
+            and any(term in actionable_answers[2].lower() for term in ("follow-up", "attach", "ask"))
+        )
+        self.result.rubric.append(RubricItem(
+            "Concise and actionable",
+            2 if bounded and concrete_next_step else (1 if bounded or concrete_next_step else 0),
+            2,
+            "Representative spending, reconciliation, and security answers were checked for bounded length and next steps.",
         ))
 
     def run(self) -> EvaluationResult:
@@ -854,7 +908,7 @@ class ConversationEvaluator:
         self.evaluate_financial_math(session_id)
         self.evaluate_amazon_and_email(session_id)
         employee_before, _ = self.evaluate_intake_and_bank_reconciliation(session_id)
-        mfa, follow_up, unknown = self.evaluate_security_and_injection(session_id)
+        mfa, unassisted_follow_up, follow_up, unknown = self.evaluate_security_and_injection(session_id)
         employee_after = self.evaluate_correction(session_id, employee_before)
         self.evaluate_company_isolation()
 
@@ -871,6 +925,7 @@ class ConversationEvaluator:
             self.responses["finance.money_flow_first"],
             self.responses["finance.money_flow_repeat"],
             mfa,
+            unassisted_follow_up,
             follow_up,
             unknown,
             employee_before,
