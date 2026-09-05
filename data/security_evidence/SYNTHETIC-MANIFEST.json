@@ -1,0 +1,77 @@
+{
+  "title": "SYNTHETIC Meridian Works Track 3 Packet Manifest",
+  "synthetic": true,
+  "packet_version": "1.0",
+  "unsupported_question_behavior": "unknown",
+  "expected_question_behavior": [
+    {"question_id": "SEC-Q-001", "expected_status": "conflict"},
+    {"question_id": "SEC-Q-002", "expected_status": "partial"},
+    {"question_id": "SEC-Q-003", "expected_status": "partial"},
+    {"question_id": "SEC-Q-004", "expected_status": "partial"},
+    {"question_id": "SEC-Q-005", "expected_status": "supported"},
+    {"question_id": "SEC-Q-006", "expected_status": "partial"},
+    {"question_id": "SEC-Q-007", "expected_status": "conflict"}
+  ],
+  "files": [
+    {
+      "filename": "../security_questionnaire/SYNTHETIC-security-questionnaire.json",
+      "label": "Seven Prompt Input",
+      "purpose": "Declares the seven review prompts supplied to the deterministic assessor.",
+      "expected_behavior": "input"
+    },
+    {
+      "filename": "SYNTHETIC-Access-Control-Policy.md",
+      "label": "Identity Requirement Policy",
+      "purpose": "Supplies normative identity requirements and exception governance.",
+      "expected_behavior": "conflict"
+    },
+    {
+      "filename": "SYNTHETIC-Identity-Export.txt",
+      "label": "Identity Provider Export",
+      "purpose": "Supplies observed enrollment totals and exception records.",
+      "expected_behavior": "conflict"
+    },
+    {
+      "filename": "SYNTHETIC-Data-Inventory.md",
+      "label": "Application Inventory",
+      "purpose": "Supplies hosting scope while exposing missing third-party coverage.",
+      "expected_behavior": "partial"
+    },
+    {
+      "filename": "SYNTHETIC-Backup-Job-History.txt",
+      "label": "Recovery Job Log",
+      "purpose": "Supplies observed job outcomes and the recorded cadence.",
+      "expected_behavior": "partial"
+    },
+    {
+      "filename": "SYNTHETIC-Vulnerability-Scan-Summary.txt",
+      "label": "Scanner Output",
+      "purpose": "Supplies assessment completion and remediation assignment state.",
+      "expected_behavior": "supported"
+    },
+    {
+      "filename": "SYNTHETIC-Production-Access-Roster.json",
+      "label": "Privileged Roster",
+      "purpose": "Supplies fictional human and non-human principal records and an ownership gap.",
+      "expected_behavior": "partial"
+    },
+    {
+      "filename": "SYNTHETIC-Employee-Offboarding-Policy.md",
+      "label": "Leaver Policy",
+      "purpose": "Supplies joiner-mover-leaver timing and audit requirements.",
+      "expected_behavior": "conflict"
+    },
+    {
+      "filename": "SYNTHETIC-Internal-IT-Message.txt",
+      "label": "Operations Notice",
+      "purpose": "Supplies an observed joiner-mover-leaver exception and open remediation record.",
+      "expected_behavior": "conflict"
+    },
+    {
+      "filename": "SYNTHETIC-MANIFEST.json",
+      "label": "Packet Index",
+      "purpose": "Indexes synthetic packet components and expected assessment states.",
+      "expected_behavior": "metadata_only"
+    }
+  ]
+}

@@ -4,8 +4,13 @@ import os
 import time
 import json
 import hashlib
+import hmac
 import re
 import tempfile
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -13,25 +18,48 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
+from src import secure_credentials
+
 from src.core import (
     PROJECT_ROOT,
+    add_intake_folder,
     answer_question,
+    bank_connector_status,
+    commit_bank_statement_preview,
+    correct_intake_expense,
+    create_plaid_link_token,
+    create_company_workspace,
+    disconnect_plaid_connection,
     explain_with_runtime_model,
+    exchange_plaid_public_token,
     get_dashboard,
     get_record,
+    get_reconciliation_summary,
     import_transactions_csv,
     import_gmail_metadata,
     import_ocr_receipt,
     generate_security_questionnaire,
     initialize_database,
+    list_intake_folders,
     list_import_sources,
+    list_workspaces,
     list_chat_history,
+    list_intake_expense_history,
     prism_status,
+    preview_plaid_disconnect,
+    preview_source_removal,
+    require_workspace,
     record_action,
     record_chat_turn,
     remove_source,
+    remove_intake_folder,
+    rename_company_workspace,
+    reset_synthetic_demo_state,
     scan_intake_folder,
     send_prism_trace,
+    sync_plaid_transactions,
+    update_intake_folder,
+    preview_bank_statement,
 )
 
 
@@ -48,11 +76,19 @@ def load_local_env() -> None:
 
 
 load_local_env()
-initialize_database()
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-OAUTH_STATE: dict[str, str] = {}
+OAUTH_STATE: dict[str, dict] = {}
 OCR_PREVIEWS: dict[str, dict] = {}
+BANK_PREVIEWS: dict[str, dict] = {}
+SOURCE_REMOVAL_PREVIEWS: dict[str, dict] = {}
+BANK_DISCONNECT_PREVIEWS: dict[str, dict] = {}
+BANK_DISCONNECT_PREVIEW_LOCK = threading.RLock()
+BANK_DISCONNECT_PREVIEW_TTL_SECONDS = 10 * 60
+GMAIL_DISCONNECT_PREVIEWS: dict[str, dict] = {}
+GMAIL_CREDENTIAL_LOCK = threading.RLock()
+GMAIL_STATE_TTL_SECONDS = 10 * 60
+GMAIL_PREVIEW_TTL_SECONDS = 10 * 60
 
 
 @app.get("/")
@@ -62,17 +98,48 @@ def index():
 
 @app.get("/api/dashboard")
 def dashboard():
-    workspace = request.args.get("workspace", "business")
-    if workspace not in {"business", "personal"}:
-        return jsonify({"error": "Unknown workspace"}), 400
-    return jsonify(get_dashboard(workspace))
+    try:
+        workspace = _require_workspace(request.args.get("workspace"), "business")
+        return jsonify(get_dashboard(workspace))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.get("/api/workspaces")
+def workspaces_list():
+    return jsonify({"workspaces": list_workspaces()})
+
+
+@app.post("/api/workspaces")
+def workspace_create():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "A JSON object is required"}), 400
+    try:
+        return jsonify(create_company_workspace(str(payload.get("name") or ""))), 201
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.patch("/api/workspaces/<workspace_id>")
+def workspace_rename(workspace_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "A JSON object is required"}), 400
+    try:
+        return jsonify(rename_company_workspace(workspace_id, str(payload.get("name") or "")))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.get("/api/records/<path:entity_id>")
 def record(entity_id: str):
-    workspace = request.args.get("workspace", "business")
-    item = get_record(entity_id, workspace)
-    return (jsonify(item), 200) if item else (jsonify({"error": "Record not found"}), 404)
+    try:
+        workspace = _require_workspace(request.args.get("workspace"), "business")
+        item = get_record(entity_id, workspace)
+        return (jsonify(item), 200) if item else (jsonify({"error": "Record not found"}), 404)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.post("/api/chat")
@@ -81,9 +148,12 @@ def chat():
     question = str(payload.get("question", "")).strip()
     if not question:
         return jsonify({"error": "Ask a question"}), 400
-    workspace = payload.get("workspace", "business")
+    try:
+        workspace = _require_workspace(payload.get("workspace"), "business")
+        session_id = _require_session_id(payload.get("session_id") or "payproof-session")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     selected_id = payload.get("selected_id")
-    session_id = str(payload.get("session_id") or "payproof-session")
     started = time.perf_counter()
     result = answer_question(question, workspace, selected_id, payload.get("filters"))
     result, model_status = explain_with_runtime_model(question, result)
@@ -97,7 +167,13 @@ def chat():
 
 @app.get("/api/chat/history")
 def chat_history():
-    return jsonify(list_chat_history(str(request.args.get("session_id") or "payproof-session"), request.args.get("workspace", "business")))
+    try:
+        return jsonify(list_chat_history(
+            _require_session_id(request.args.get("session_id") or "payproof-session"),
+            _require_workspace(request.args.get("workspace"), "business"),
+        ))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.get("/api/security/questionnaire")
@@ -118,8 +194,7 @@ def actions():
 
 @app.post("/api/reset")
 def reset():
-    initialize_database(reset=True)
-    return jsonify({"ok": True})
+    return jsonify(reset_synthetic_demo_state())
 
 
 @app.post("/api/import/transactions")
@@ -147,94 +222,811 @@ def health():
     return jsonify({"status": "ok", "prism": prism_status()})
 
 
-def _gmail_paths():
-    return PROJECT_ROOT / "credentials.json.json", PROJECT_ROOT / "data" / "runtime" / "gmail-token.json"
+def _require_workspace(value, default: str = "business") -> str:
+    workspace = default if value is None or value == "" else value
+    if not isinstance(workspace, str):
+        raise ValueError("Unknown workspace")
+    return require_workspace(workspace)
+
+
+def _require_session_id(value) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value.strip()) > 200:
+        raise ValueError("A valid session_id is required")
+    return value.strip()
+
+
+def _gmail_paths(workspace_id: str = "business"):
+    workspace_id = _require_workspace(workspace_id)
+    standard_credentials = PROJECT_ROOT / "credentials.json"
+    legacy_credentials = PROJECT_ROOT / "credentials.json.json"
+    credentials_path = (
+        standard_credentials
+        if standard_credentials.exists() or not legacy_credentials.exists()
+        else legacy_credentials
+    )
+    return (
+        credentials_path,
+        PROJECT_ROOT / "data" / "runtime" / f"gmail-{workspace_id}-token.dpapi.json",
+    )
+
+
+def _gmail_token_purpose(workspace_id: str) -> str:
+    return f"gmail-oauth:{_require_workspace(workspace_id)}"
+
+
+def _session_fingerprint(session_id: str) -> str:
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+
+
+def _prune_timed_store(store: dict[str, dict], ttl_seconds: int, maximum: int = 128) -> None:
+    now = time.time()
+    for key in [key for key, value in store.items() if now - float(value.get("created", 0)) > ttl_seconds]:
+        store.pop(key, None)
+    while len(store) >= maximum:
+        oldest = min(store, key=lambda key: float(store[key].get("created", 0)))
+        store.pop(oldest, None)
+
+
+def _remember_gmail_oauth_state(state: str, workspace_id: str, redirect_uri: str,
+                                 session_id: str) -> None:
+    if not isinstance(state, str) or not state or len(state) > 1000:
+        raise ValueError("Google did not return a valid OAuth state")
+    _prune_timed_store(OAUTH_STATE, GMAIL_STATE_TTL_SECONDS)
+    OAUTH_STATE[state] = {
+        "workspace": _require_workspace(workspace_id),
+        "redirect_uri": redirect_uri,
+        "session_fingerprint": _session_fingerprint(_require_session_id(session_id)),
+        "created": time.time(),
+    }
+
+
+def _consume_gmail_oauth_state(state: str) -> dict | None:
+    entry = OAUTH_STATE.pop(state, None)
+    if not isinstance(entry, dict):
+        return None
+    if time.time() - float(entry.get("created", 0)) > GMAIL_STATE_TTL_SECONDS:
+        return None
+    try:
+        entry["workspace"] = _require_workspace(entry.get("workspace"))
+    except ValueError:
+        return None
+    if not isinstance(entry.get("redirect_uri"), str) or not entry["redirect_uri"]:
+        return None
+    return entry
+
+
+def _gmail_ciphertext_digest(token_path: Path) -> str | None:
+    if not token_path.exists():
+        return None
+    try:
+        return hashlib.sha256(token_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise secure_credentials.SecureCredentialError(
+            "The protected Gmail credential could not be inspected"
+        ) from exc
+
+
+def _gmail_status(workspace_id: str) -> dict:
+    credentials_path, token_path = _gmail_paths(workspace_id)
+    storage_available = secure_credentials.secure_storage_available()
+    token_present = token_path.exists()
+    connected = bool(storage_available and token_present)
+    if connected:
+        state = "connected"
+    elif token_present:
+        state = "secure_storage_unavailable"
+    else:
+        state = "not_connected"
+    legacy_token_present = (PROJECT_ROOT / "data" / "runtime" / "gmail-token.json").exists()
+    return {
+        "id": "gmail",
+        "provider": "Gmail",
+        "workspace": workspace_id,
+        "credentials_available": credentials_path.exists(),
+        "connected": connected,
+        "state": state,
+        "mode": "read-only metadata and snippets",
+        "token_stored_locally": token_present,
+        "secure_token_storage": "windows_dpapi" if storage_available else "unavailable",
+        "plaintext_fallback_enabled": False,
+        "legacy_plaintext_token_detected": legacy_token_present,
+        "upstream_data_changed_on_remove": False,
+        "capabilities": [
+            "connect",
+            "reconnect",
+            "disconnect_preview",
+            "disconnect_with_revocation",
+            "import_metadata",
+            "remove_local_evidence",
+        ],
+    }
 
 
 @app.get("/api/sources")
 def sources():
-    workspace = request.args.get("workspace", "business")
-    credentials_path, token_path = _gmail_paths()
+    try:
+        workspace = require_workspace(str(request.args.get("workspace") or "business"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    bank = bank_connector_status(workspace)
+    gmail = _gmail_status(workspace)
+    intake_folders = list_intake_folders(workspace)
     return jsonify({
-        "gmail": {"credentials_available": credentials_path.exists(), "connected": token_path.exists(),
-                  "mode": "read-only metadata and snippets", "token_stored_locally": token_path.exists()},
+        "gmail": gmail,
         "imports": list_import_sources(workspace), "csv": {"available": True},
-        "intake_folder": {"available": True, "mode": "local JSON paperwork", "path": str(PROJECT_ROOT / "intake")},
+        "bank": bank,
+        "connections": [gmail, {"id": "bank", **bank,
+                                  "capabilities": ["add_local_statement", "remove_local_statement", "view_reconciliation",
+                                                   "create_link_token", "exchange_public_token", "sync", "disconnect"]}],
+        "capabilities": {"source_removal_requires_preview": True, "source_removal_requires_confirmation": True,
+                         "add_bank": "/api/import/bank/preview", "add_email": "/api/sources/gmail/connect"},
+        "intake_folder": {"available": True, "mode": "local JSON paperwork",
+                          "path": str(PROJECT_ROOT / "intake"), "folders": intake_folders,
+                          "editable": True, "edit_mode": "audited_correction", "originals_preserved": True,
+                          "editable_fields": ["merchant", "amount", "currency", "date", "category", "purpose", "receipt_status", "approval_status"]},
     })
 
 
 @app.post("/api/sources/intake/scan")
 def intake_scan():
-    return jsonify(scan_intake_folder())
+    payload = request.get_json(silent=True) or {}
+    try:
+        workspace = _require_workspace(payload.get("workspace"), "business")
+        folder_id = payload.get("folder_id")
+        if folder_id is not None and not isinstance(folder_id, str):
+            raise ValueError("folder_id must be a string")
+        return jsonify(scan_intake_folder(workspace, folder_id or None))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.get("/api/workspaces/<workspace_id>/intake-folders")
+def intake_folders_list(workspace_id: str):
+    try:
+        return jsonify({"workspace": require_workspace(workspace_id),
+                        "folders": list_intake_folders(workspace_id)})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+@app.post("/api/workspaces/<workspace_id>/intake-folders")
+def intake_folder_add(workspace_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "A JSON object is required"}), 400
+    try:
+        item = add_intake_folder(
+            workspace_id, str(payload.get("path") or ""),
+            label=payload.get("label"),
+            include_subfolders=payload.get("include_subfolders", False),
+        )
+        return jsonify(item), 201
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.patch("/api/workspaces/<workspace_id>/intake-folders/<folder_id>")
+def intake_folder_update(workspace_id: str, folder_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "A JSON object is required"}), 400
+    try:
+        return jsonify(update_intake_folder(workspace_id, folder_id, payload))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.delete("/api/workspaces/<workspace_id>/intake-folders/<folder_id>")
+def intake_folder_remove(workspace_id: str, folder_id: str):
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(remove_intake_folder(
+            workspace_id, folder_id, confirmed=payload.get("confirm") is True,
+        ))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.patch("/api/intake/expenses/<expense_id>")
+def intake_expense_correction(expense_id: str):
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(correct_intake_expense(
+            str(payload.get("workspace") or "business"), expense_id,
+            payload.get("changes") or {}, str(payload.get("reason") or ""),
+        ))
+    except (ValueError, ArithmeticError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.get("/api/intake/expenses/<expense_id>/history")
+def intake_expense_history(expense_id: str):
+    try:
+        return jsonify(list_intake_expense_history(
+            str(request.args.get("workspace") or "business"), expense_id,
+        ))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+@app.get("/api/sources/bank/status")
+def bank_status():
+    try:
+        return jsonify(bank_connector_status(
+            _require_workspace(request.args.get("workspace"), "business")
+        ))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+def _bank_connector_error(exc: Exception):
+    message = str(exc)
+    if "not configured" in message:
+        status = 503
+    elif "unavailable" in message or "not supported" in message:
+        status = 501
+    elif "not found" in message:
+        status = 404
+    else:
+        status = 502
+    details = getattr(exc, "details", {})
+    return jsonify({"error": message, "connected": False, **details}), status
+
+
+@app.post("/api/sources/bank/link-token")
+def bank_link_token():
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(create_plaid_link_token(
+            str(payload.get("workspace") or "business"),
+            str(payload.get("session_id") or "payproof-local-session"),
+        ))
+    except (RuntimeError, ValueError) as exc:
+        return _bank_connector_error(exc)
+
+
+@app.post("/api/sources/bank/exchange")
+def bank_public_token_exchange():
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(exchange_plaid_public_token(
+            str(payload.get("workspace") or "business"), str(payload.get("public_token") or ""),
+            str(payload.get("institution") or ""),
+        ))
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "connected": False}), 400
+    except RuntimeError as exc:
+        return _bank_connector_error(exc)
+
+
+@app.post("/api/sources/bank/<connection_id>/sync")
+def bank_connection_sync(connection_id: str):
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(sync_plaid_transactions(
+            str(payload.get("workspace") or "business"), connection_id,
+        ))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except RuntimeError as exc:
+        return _bank_connector_error(exc)
+
+
+@app.get("/api/sources/bank/<connection_id>/disconnect-preview")
+def bank_connection_disconnect_preview(connection_id: str):
+    try:
+        workspace = _require_workspace(request.args.get("workspace"), "business")
+        session_id = _require_session_id(request.args.get("session_id"))
+        details = preview_plaid_disconnect(workspace, connection_id)
+    except ValueError as exc:
+        status = 404 if "not found" in str(exc).lower() else 400
+        return jsonify({"error": str(exc)}), status
+    preview_id = str(uuid.uuid4())
+    with BANK_DISCONNECT_PREVIEW_LOCK:
+        _prune_timed_store(BANK_DISCONNECT_PREVIEWS, BANK_DISCONNECT_PREVIEW_TTL_SECONDS)
+        BANK_DISCONNECT_PREVIEWS[preview_id] = {
+            "workspace": workspace, "connection_id": connection_id,
+            "session_fingerprint": _session_fingerprint(session_id),
+            "details": details, "created": time.time(),
+        }
+    return jsonify({**details, "preview_id": preview_id,
+                    "expires_in_seconds": BANK_DISCONNECT_PREVIEW_TTL_SECONDS,
+                    "one_time": True, "session_bound": True})
+
+
+@app.delete("/api/sources/bank/<connection_id>")
+def bank_connection_disconnect(connection_id: str):
+    payload = request.get_json(silent=True) or {}
+    preview_id = str(payload.get("preview_id") or "")
+    if payload.get("confirm") is not True:
+        return jsonify({"error": "A fresh one-time disconnect preview and explicit confirmation are required"}), 400
+    try:
+        workspace = require_workspace(str(payload.get("workspace") or "business"))
+        session_fingerprint = _session_fingerprint(_require_session_id(payload.get("session_id")))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    with BANK_DISCONNECT_PREVIEW_LOCK:
+        preview = BANK_DISCONNECT_PREVIEWS.get(preview_id)
+        if preview and time.time() - preview["created"] > BANK_DISCONNECT_PREVIEW_TTL_SECONDS:
+            BANK_DISCONNECT_PREVIEWS.pop(preview_id, None)
+            preview = None
+        if not preview:
+            return jsonify({"error": "A fresh one-time disconnect preview and explicit confirmation are required"}), 400
+        matches_requester = (
+            preview["connection_id"] == connection_id
+            and preview["workspace"] == workspace
+            and hmac.compare_digest(preview["session_fingerprint"], session_fingerprint)
+        )
+        if matches_requester:
+            BANK_DISCONNECT_PREVIEWS.pop(preview_id, None)
+    if not matches_requester:
+        return jsonify({"error": "Disconnect preview does not match this session, workspace, or connection"}), 400
+    try:
+        current = preview_plaid_disconnect(workspace, connection_id)
+        if current != preview["details"]:
+            return jsonify({"error": "Connection impact changed; request a new disconnect preview"}), 409
+        return jsonify(disconnect_plaid_connection(workspace, connection_id, confirmed=True))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except RuntimeError as exc:
+        return _bank_connector_error(exc)
+
+
+@app.post("/api/import/bank/preview")
+def bank_import_preview():
+    if "file" not in request.files:
+        return jsonify({"error": "Choose a CSV, OFX, or QFX statement"}), 400
+    uploaded = request.files["file"]
+    filename = Path(uploaded.filename or "bank-statement.csv").name
+    if Path(filename).suffix.lower() not in {".csv", ".ofx", ".qfx"}:
+        return jsonify({"error": "Supported bank formats are CSV, OFX, and QFX"}), 400
+    raw = uploaded.read(5 * 1024 * 1024 + 1)
+    if not raw or len(raw) > 5 * 1024 * 1024:
+        return jsonify({"error": "Statement must be between 1 byte and 5 MB"}), 400
+    try:
+        content = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        content = raw.decode("cp1252")
+    workspace = str(request.form.get("workspace") or "business")
+    result = preview_bank_statement(workspace, filename, content)
+    if result.get("errors"):
+        return jsonify(result), 400
+    preview_id = str(uuid.uuid4())
+    now = time.time()
+    for key in [key for key, value in BANK_PREVIEWS.items() if now - value["created"] > 15 * 60]:
+        BANK_PREVIEWS.pop(key, None)
+    # Raw statement text and full account identifiers are deliberately not retained.
+    BANK_PREVIEWS[preview_id] = {
+        "workspace": workspace, "filename": filename, "source_hash": result["source_hash"],
+        "records": result["accepted"], "created": now,
+    }
+    return jsonify({**result, "preview_id": preview_id, "expires_in_seconds": 900})
+
+
+@app.post("/api/import/bank/commit")
+def bank_import_commit():
+    payload = request.get_json(silent=True) or {}
+    preview_id = str(payload.get("preview_id") or "")
+    preview = BANK_PREVIEWS.pop(preview_id, None)
+    if not preview or time.time() - preview["created"] > 15 * 60:
+        return jsonify({"error": "Bank preview expired; choose the statement again"}), 400
+    workspace = str(payload.get("workspace") or preview["workspace"])
+    if workspace != preview["workspace"]:
+        BANK_PREVIEWS[preview_id] = preview
+        return jsonify({"error": "The preview belongs to a different workspace"}), 400
+    result = commit_bank_statement_preview(
+        workspace, preview["filename"], preview["source_hash"], preview["records"],
+    )
+    if result.get("errors"):
+        BANK_PREVIEWS[preview_id] = preview
+        return jsonify(result), 400
+    return jsonify(result)
+
+
+@app.get("/api/reconciliation")
+def reconciliation():
+    try:
+        limit = int(request.args.get("limit", "200"))
+        workspace = _require_workspace(request.args.get("workspace"), "business")
+        return jsonify(get_reconciliation_summary(workspace, limit))
+    except ValueError as exc:
+        message = str(exc)
+        return jsonify({"error": "limit must be a number" if "invalid literal" in message else message}), 400
+
+
+@app.get("/api/templates/bank.csv")
+def bank_csv_template():
+    content = "date,description,amount,direction,currency,account_last4,reference,id\n2026-09-05,Example merchant,125.50,debit,USD,4242,INV-EXAMPLE,BANK-EXAMPLE-001\n"
+    return Response(content, mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=bank-statement-template.csv"})
+
+
+@app.get("/api/templates/intake.json")
+def intake_json_template():
+    return jsonify({
+        "id": "EXP-YYYY-NNN", "document_type": "employee_expense_report", "employee": "Employee name",
+        "department": "Department", "office": "Office", "merchant": "Merchant", "amount": "0.00",
+        "currency": "USD", "date": "2026-09-05", "category": "Category", "purpose": "Business purpose",
+        "receipt_status": "missing", "approval_status": "needs_review",
+    })
 
 
 @app.get("/api/sources/gmail/connect")
 def gmail_connect():
-    credentials_path, _ = _gmail_paths()
+    try:
+        workspace = _require_workspace(request.args.get("workspace"), "business")
+        session_id = _require_session_id(
+            request.args.get("session_id") or "payproof-local-session"
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "connected": False}), 400
+    credentials_path, _ = _gmail_paths(workspace)
     if not credentials_path.exists():
         return jsonify({"error": "Google OAuth client file is missing"}), 400
+    if not secure_credentials.secure_storage_available():
+        return jsonify({
+            "error": "Gmail connection is unavailable because OS-protected token storage is not supported",
+            "connected": False,
+            "plaintext_fallback_enabled": False,
+        }), 501
     try:
         from google_auth_oauthlib.flow import Flow
     except ImportError:
         return jsonify({"error": "Google connector packages are not installed. Run Setup PayProof.cmd."}), 503
     redirect_uri = request.url_root.rstrip("/") + "/oauth2callback"
-    flow = Flow.from_client_secrets_file(str(credentials_path), scopes=GMAIL_SCOPES, redirect_uri=redirect_uri)
-    authorization_url, state = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
-    OAUTH_STATE[state] = redirect_uri
-    return jsonify({"authorization_url": authorization_url})
+    try:
+        flow = Flow.from_client_secrets_file(
+            str(credentials_path), scopes=GMAIL_SCOPES, redirect_uri=redirect_uri
+        )
+        authorization_url, state = flow.authorization_url(
+            access_type="offline", include_granted_scopes="true", prompt="consent"
+        )
+        with GMAIL_CREDENTIAL_LOCK:
+            _remember_gmail_oauth_state(state, workspace, redirect_uri, session_id)
+    except Exception as exc:
+        return jsonify({
+            "error": f"Google OAuth could not start ({type(exc).__name__})",
+            "connected": False,
+        }), 400
+    return jsonify({
+        "authorization_url": authorization_url,
+        "workspace": workspace,
+        "secure_token_storage": "windows_dpapi",
+    })
+
+
+def _load_gmail_credentials(workspace_id: str):
+    from google.oauth2.credentials import Credentials
+
+    _, token_path = _gmail_paths(workspace_id)
+    serialized = secure_credentials.read_protected_text(
+        token_path, _gmail_token_purpose(workspace_id)
+    )
+    try:
+        information = json.loads(serialized)
+        if not isinstance(information, dict):
+            raise ValueError("not an object")
+        return Credentials.from_authorized_user_info(information, GMAIL_SCOPES)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise secure_credentials.SecureCredentialCorrupt(
+            "The decrypted Gmail credential is invalid"
+        ) from exc
+
+
+def _revoke_google_credentials(credentials) -> dict:
+    token = str(getattr(credentials, "refresh_token", None) or getattr(credentials, "token", None) or "")
+    if not token:
+        return {"revoked": False, "provider_status": None, "state": "credential_has_no_revocable_token"}
+    request_body = urllib.parse.urlencode({"token": token}).encode("ascii")
+    revoke_request = urllib.request.Request(
+        "https://oauth2.googleapis.com/revoke",
+        data=request_body,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(revoke_request, timeout=12) as response:
+            status = int(getattr(response, "status", response.getcode()))
+    except urllib.error.HTTPError as exc:
+        return {"revoked": False, "provider_status": exc.code, "state": "provider_rejected_revocation"}
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return {"revoked": False, "provider_status": None, "state": "provider_unreachable"}
+    return {
+        "revoked": status == 200,
+        "provider_status": status,
+        "state": "revoked" if status == 200 else "unexpected_provider_response",
+    }
+
+
+@app.post("/api/sources/gmail/disconnect-preview")
+def gmail_disconnect_preview():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "A JSON object is required"}), 400
+    try:
+        workspace = _require_workspace(payload.get("workspace"), "business")
+        session_id = _require_session_id(payload.get("session_id"))
+        _, token_path = _gmail_paths(workspace)
+        if token_path.exists() and not secure_credentials.secure_storage_available():
+            raise secure_credentials.SecureStorageUnavailable(
+                "The Gmail credential cannot be opened without OS-protected storage"
+            )
+        evidence = preview_source_removal(workspace, "gmail")["affected"]["email_evidence"]
+        with GMAIL_CREDENTIAL_LOCK:
+            credential_digest = _gmail_ciphertext_digest(token_path)
+            _prune_timed_store(GMAIL_DISCONNECT_PREVIEWS, GMAIL_PREVIEW_TTL_SECONDS)
+            preview_id = str(uuid.uuid4())
+            GMAIL_DISCONNECT_PREVIEWS[preview_id] = {
+                "workspace": workspace,
+                "session_fingerprint": _session_fingerprint(session_id),
+                "credential_digest": credential_digest,
+                "email_evidence": evidence,
+                "created": time.time(),
+            }
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except secure_credentials.SecureCredentialError as exc:
+        return jsonify({"error": str(exc), "disconnected": False}), 503
+    return jsonify({
+        "preview_id": preview_id,
+        "workspace": workspace,
+        "connected": credential_digest is not None,
+        "confirmation_required": True,
+        "expires_in_seconds": GMAIL_PREVIEW_TTL_SECONDS,
+        "impact": {
+            "local_encrypted_token_will_be_deleted": credential_digest is not None,
+            "google_authorization_will_be_revoked_first": credential_digest is not None,
+            "imported_evidence_preserved": True,
+            "imported_evidence_count": evidence,
+            "gmail_messages_deleted": False,
+            "same_google_grant_in_other_workspaces_may_be_affected": True,
+        },
+    })
+
+
+@app.post("/api/sources/gmail/disconnect")
+def gmail_disconnect():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "A JSON object is required", "disconnected": False}), 400
+    if payload.get("confirm") is not True:
+        return jsonify({
+            "error": "Preview the impact and explicitly confirm Gmail disconnection",
+            "disconnected": False,
+            "upstream_data_deleted": False,
+        }), 400
+    try:
+        workspace = _require_workspace(payload.get("workspace"), "business")
+        session_id = _require_session_id(payload.get("session_id"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "disconnected": False}), 400
+    preview_id = payload.get("preview_id")
+    if not isinstance(preview_id, str) or not preview_id:
+        return jsonify({"error": "A disconnect preview is required", "disconnected": False}), 400
+
+    with GMAIL_CREDENTIAL_LOCK:
+        preview = GMAIL_DISCONNECT_PREVIEWS.pop(preview_id, None)
+        if not preview or time.time() - float(preview.get("created", 0)) > GMAIL_PREVIEW_TTL_SECONDS:
+            return jsonify({"error": "The disconnect preview is invalid or expired", "disconnected": False}), 400
+        if preview.get("workspace") != workspace or not hmac.compare_digest(
+            str(preview.get("session_fingerprint") or ""), _session_fingerprint(session_id)
+        ):
+            return jsonify({"error": "The disconnect preview does not match this workspace and session",
+                            "disconnected": False}), 403
+        _, token_path = _gmail_paths(workspace)
+        try:
+            current_digest = _gmail_ciphertext_digest(token_path)
+            evidence = preview_source_removal(workspace, "gmail")["affected"]["email_evidence"]
+        except secure_credentials.SecureCredentialError as exc:
+            return jsonify({"error": str(exc), "disconnected": False}), 503
+        if current_digest != preview.get("credential_digest") or evidence != preview.get("email_evidence"):
+            return jsonify({"error": "Gmail connection impact changed; create a new preview",
+                            "disconnected": False}), 409
+        if current_digest is None:
+            return jsonify({
+                "workspace": workspace,
+                "state": "already_disconnected",
+                "disconnected": True,
+                "upstream_authorization_revoked": None,
+                "local_token_deleted": False,
+                "imported_evidence_preserved": True,
+                "imported_evidence_count": evidence,
+                "upstream_data_deleted": False,
+            })
+        if not secure_credentials.secure_storage_available():
+            return jsonify({
+                "error": "OS-protected storage is unavailable; the credential was not opened or deleted",
+                "state": "secure_storage_unavailable",
+                "disconnected": False,
+                "upstream_authorization_revoked": False,
+                "local_token_deleted": False,
+                "imported_evidence_preserved": True,
+            }), 503
+        try:
+            credentials = _load_gmail_credentials(workspace)
+        except (ImportError, secure_credentials.SecureCredentialError):
+            return jsonify({
+                "error": "The encrypted Gmail credential could not be loaded; nothing was deleted",
+                "state": "credential_load_failed",
+                "disconnected": False,
+                "upstream_authorization_revoked": False,
+                "local_token_deleted": False,
+                "imported_evidence_preserved": True,
+            }), 503
+        revocation = _revoke_google_credentials(credentials)
+        if not revocation["revoked"]:
+            return jsonify({
+                "error": "Google authorization could not be revoked; the encrypted token was retained for retry",
+                "state": revocation["state"],
+                "provider_status": revocation["provider_status"],
+                "disconnected": False,
+                "upstream_authorization_revoked": False,
+                "local_token_deleted": False,
+                "imported_evidence_preserved": True,
+                "imported_evidence_count": evidence,
+                "upstream_data_deleted": False,
+            }), 502
+        try:
+            token_path.unlink()
+        except OSError:
+            return jsonify({
+                "error": "Google authorization was revoked, but local encrypted-token cleanup failed",
+                "state": "upstream_revoked_local_cleanup_failed",
+                "provider_status": revocation["provider_status"],
+                "disconnected": False,
+                "upstream_authorization_revoked": True,
+                "local_token_deleted": False,
+                "imported_evidence_preserved": True,
+                "imported_evidence_count": evidence,
+                "upstream_data_deleted": False,
+            }), 500
+    return jsonify({
+        "workspace": workspace,
+        "state": "disconnected",
+        "disconnected": True,
+        "provider_status": revocation["provider_status"],
+        "upstream_authorization_revoked": True,
+        "local_token_deleted": True,
+        "imported_evidence_preserved": True,
+        "imported_evidence_count": evidence,
+        "upstream_data_deleted": False,
+        "notice": "Google authorization was revoked and PayProof's encrypted token was deleted. Imported evidence was preserved.",
+    })
 
 
 @app.get("/oauth2callback")
 def gmail_callback():
     state = request.args.get("state", "")
-    redirect_uri = OAUTH_STATE.pop(state, None)
-    if not redirect_uri:
+    with GMAIL_CREDENTIAL_LOCK:
+        oauth_state = _consume_gmail_oauth_state(state)
+    if not oauth_state:
         return "Invalid or expired OAuth state. Return to PayProof and try again.", 400
-    credentials_path, token_path = _gmail_paths()
+    workspace = oauth_state["workspace"]
+    credentials_path, token_path = _gmail_paths(workspace)
+    if not secure_credentials.secure_storage_available():
+        return "Gmail connection failed because protected token storage is unavailable. No plaintext token was saved.", 503
     try:
         from google_auth_oauthlib.flow import Flow
-        flow = Flow.from_client_secrets_file(str(credentials_path), scopes=GMAIL_SCOPES, state=state, redirect_uri=redirect_uri)
+        flow = Flow.from_client_secrets_file(
+            str(credentials_path), scopes=GMAIL_SCOPES, state=state,
+            redirect_uri=oauth_state["redirect_uri"],
+        )
         flow.fetch_token(authorization_response=request.url)
-        token_path.parent.mkdir(parents=True, exist_ok=True)
-        token_path.write_text(flow.credentials.to_json(), encoding="utf-8")
-        return "<html><body style='background:#020711;color:#edf8ff;font-family:Segoe UI;padding:40px'><h1>Gmail connected</h1><p>Read-only permission was saved locally. Return to PayProof and select Import Gmail evidence.</p><script>setTimeout(()=>window.close(),2500)</script></body></html>"
     except Exception as exc:
         return f"Gmail connection failed: {type(exc).__name__}. Return to PayProof and try again.", 400
+    try:
+        with GMAIL_CREDENTIAL_LOCK:
+            secure_credentials.write_protected_text(
+                token_path, flow.credentials.to_json(), _gmail_token_purpose(workspace)
+            )
+    except secure_credentials.SecureCredentialError:
+        revocation = _revoke_google_credentials(flow.credentials)
+        state_notice = "The new authorization was revoked." if revocation["revoked"] else (
+            "Automatic revocation also failed; remove PayProof from your Google Account permissions."
+        )
+        return (
+            "Gmail connection failed because the token could not be stored securely. "
+            f"No plaintext token was saved. {state_notice}",
+            503,
+        )
+    return (
+        "<html><body style='background:#020711;color:#edf8ff;font-family:Segoe UI;padding:40px'>"
+        "<h1>Gmail connected</h1><p>The read-only authorization was encrypted with Windows DPAPI "
+        f"for the {workspace} workspace. Return to PayProof and select Import Gmail evidence.</p>"
+        "<script>setTimeout(()=>window.close(),2500)</script></body></html>"
+    )
 
 
 @app.post("/api/sources/gmail/import")
 def gmail_import():
-    _, token_path = _gmail_paths()
-    if not token_path.exists():
-        return jsonify({"error": "Connect Gmail first"}), 400
-    payload = request.get_json(silent=True) or {}
-    query = str(payload.get("query") or "newer_than:365d (from:amazon.com OR category:purchases)")
-    max_results = min(max(int(payload.get("max_results", 20)), 1), 50)
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "A JSON object is required"}), 400
     try:
-        from google.oauth2.credentials import Credentials
+        workspace = _require_workspace(payload.get("workspace"), "personal")
+        max_results = min(max(int(payload.get("max_results", 20)), 1), 50)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc) if str(exc) == "Unknown workspace" else "max_results must be a number"}), 400
+    query = str(payload.get("query") or "newer_than:365d (from:amazon.com OR category:purchases)").strip()
+    if not query or len(query) > 500:
+        return jsonify({"error": "Gmail query must be between 1 and 500 characters"}), 400
+    _, token_path = _gmail_paths(workspace)
+    if not token_path.exists():
+        return jsonify({"error": "Connect Gmail for this workspace first"}), 400
+    if not secure_credentials.secure_storage_available():
+        return jsonify({"error": "Protected Gmail token storage is unavailable; plaintext fallback is disabled"}), 503
+    try:
         from googleapiclient.discovery import build
-        credentials = Credentials.from_authorized_user_file(str(token_path), GMAIL_SCOPES)
-        service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
-        listing = service.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
-        imported = []
-        for item in listing.get("messages", []):
-            message = service.users().messages().get(userId="me", id=item["id"], format="metadata", metadataHeaders=["From", "Subject", "Date"]).execute()
-            headers = {h["name"].lower(): h["value"] for h in message.get("payload", {}).get("headers", [])}
-            imported.append({"id": item["id"], "sender": headers.get("from", "Unknown sender"),
-                             "subject": headers.get("subject", "(no subject)"), "received_at": headers.get("date", ""),
-                             "snippet": message.get("snippet", "")})
-        result = import_gmail_metadata(imported, str(payload.get("workspace") or "personal"))
+        with GMAIL_CREDENTIAL_LOCK:
+            credentials = _load_gmail_credentials(workspace)
+            service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+            listing = service.users().messages().list(
+                userId="me", q=query, maxResults=max_results
+            ).execute()
+            imported = []
+            for item in listing.get("messages", []):
+                message = service.users().messages().get(
+                    userId="me", id=item["id"], format="metadata",
+                    metadataHeaders=["From", "Subject", "Date"],
+                ).execute()
+                headers = {
+                    h["name"].lower(): h["value"]
+                    for h in message.get("payload", {}).get("headers", [])
+                }
+                imported.append({
+                    "id": item["id"],
+                    "sender": headers.get("from", "Unknown sender"),
+                    "subject": headers.get("subject", "(no subject)"),
+                    "received_at": headers.get("date", ""),
+                    "snippet": message.get("snippet", ""),
+                })
+            # Persist any refreshed access token using the same encrypted envelope
+            # before accepting imported evidence. No decrypted temp file is used.
+            secure_credentials.write_protected_text(
+                token_path, credentials.to_json(), _gmail_token_purpose(workspace)
+            )
+            result = import_gmail_metadata(imported, workspace)
         return jsonify({**result, "query": query, "requested": max_results})
+    except ImportError:
+        return jsonify({"error": "Google connector packages are not installed. Run Setup PayProof.cmd."}), 503
+    except secure_credentials.SecureCredentialError as exc:
+        return jsonify({"error": str(exc), "imported": False}), 503
     except Exception as exc:
-        return jsonify({"error": f"Gmail import failed: {type(exc).__name__}: {exc}"}), 400
+        return jsonify({"error": f"Gmail import failed ({type(exc).__name__})"}), 502
 
 
 @app.delete("/api/sources/<source_id>")
 def delete_source(source_id: str):
+    preview_id = str(request.args.get("preview_id") or "")
+    confirm = str(request.args.get("confirm") or "").lower() == "true"
+    preview = SOURCE_REMOVAL_PREVIEWS.pop(preview_id, None)
+    if not confirm or not preview or time.time() - preview["created"] > 15 * 60:
+        return jsonify({"error": "Preview the affected records and explicitly confirm removal first",
+                        "upstream_data_deleted": False}), 400
+    workspace = request.args.get("workspace", "business")
+    if preview["source_id"] != source_id or preview["workspace"] != workspace:
+        return jsonify({"error": "Removal preview does not match this source or workspace"}), 400
     try:
-        return jsonify(remove_source(request.args.get("workspace", "business"), source_id))
+        current = preview_source_removal(workspace, source_id)
+        if current != preview["details"]:
+            return jsonify({"error": "Source contents changed; create a new removal preview"}), 409
+        return jsonify(remove_source(workspace, source_id, confirmed=True))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404
+
+
+@app.get("/api/sources/<source_id>/removal-preview")
+def source_removal_preview(source_id: str):
+    workspace = request.args.get("workspace", "business")
+    try:
+        details = preview_source_removal(workspace, source_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    preview_id = str(uuid.uuid4())
+    SOURCE_REMOVAL_PREVIEWS[preview_id] = {
+        "source_id": source_id, "workspace": workspace, "details": details, "created": time.time(),
+    }
+    return jsonify({**details, "preview_id": preview_id, "expires_in_seconds": 900,
+                    "confirmation_required": True})
 
 
 @app.post("/api/ocr/preview")
@@ -301,4 +1093,5 @@ def ocr_commit():
 
 
 if __name__ == "__main__":
+    initialize_database()
     app.run(host="127.0.0.1", port=int(os.getenv("PAYPROOF_PORT", "8765")), debug=False)

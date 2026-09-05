@@ -1,2 +1,2 @@
-id,merchant,amount,currency,date,office
-TX-EXAMPLE-001,Example Office Supply,125.50,USD,2026-09-05,New York
+id,merchant,amount,currency,date,office,direction
+TX-EXAMPLE-001,Example Office Supply,125.50,USD,2026-09-05,New York,debit

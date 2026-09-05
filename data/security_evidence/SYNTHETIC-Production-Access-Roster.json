@@ -1,0 +1,11 @@
+{
+  "title": "SYNTHETIC Production Access Roster",
+  "synthetic": true,
+  "as_of": "2026-09-04",
+  "statements": [
+    "Production access is held by four fictional employees (Maya Chen, Jordan Alvarez, Priya Shah, and Devon Brooks), two service accounts (svc-deploy and svc-reporting), and one break-glass account whose credential owner is not documented.",
+    "Production access is also held by two service accounts: svc-deploy and svc-reporting.",
+    "One break-glass production account exists; its credential owner is not documented.",
+    "MFA status for the break-glass production account is not documented."
+  ]
+}

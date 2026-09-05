@@ -1,4 +1,5 @@
 SYNTHETIC BACKUP JOB HISTORY
+Generated: 2026-09-04
 
 2026-09-02 02:00Z  SUCCESS  encrypted database backup
 2026-09-03 02:00Z  FAILED   expired storage credential

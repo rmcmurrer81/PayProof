@@ -52,7 +52,9 @@ These workstreams are intentionally separated by file ownership so three people 
 
 ## 3. Intake / evidence / judge-ready demo
 
-**Owner:** Codex / workflow and QA teammate
+**Owner:** Codex
+
+**Primary product framing:** Money Operations, with evidence-grounded assurance controls.
 
 **Branch:** `feature/intake-demo-qa`
 

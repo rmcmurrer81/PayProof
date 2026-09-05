@@ -1,0 +1,42 @@
+{
+  "title": "SYNTHETIC Meridian Works Security Questionnaire",
+  "synthetic": true,
+  "purpose": "Demonstration input for the PayProof Risk and Compliance Track.",
+  "questions": [
+    {
+      "id": "SEC-Q-001",
+      "priority": "high",
+      "question": "Is multi-factor authentication (MFA) enabled for every identity?"
+    },
+    {
+      "id": "SEC-Q-002",
+      "priority": "high",
+      "question": "Where is customer data stored?"
+    },
+    {
+      "id": "SEC-Q-003",
+      "priority": "high",
+      "question": "Is customer data encrypted at rest?"
+    },
+    {
+      "id": "SEC-Q-004",
+      "priority": "critical",
+      "question": "Are backups performed on the required schedule and currently succeeding?"
+    },
+    {
+      "id": "SEC-Q-005",
+      "priority": "high",
+      "question": "Are vulnerability scans conducted and are high-severity findings assigned for remediation?"
+    },
+    {
+      "id": "SEC-Q-006",
+      "priority": "high",
+      "question": "Who has access to production, including service and emergency accounts?"
+    },
+    {
+      "id": "SEC-Q-007",
+      "priority": "critical",
+      "question": "Does employee and contractor offboarding remove access within the required timeframe?"
+    }
+  ]
+}

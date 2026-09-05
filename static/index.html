@@ -11,16 +11,22 @@
   <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
   <div id="app" class="app-shell">
     <header class="topbar glass">
-      <div class="brand-lockup">
-        <div class="brand-mark" aria-hidden="true"><span>P</span></div>
-        <div><h1>PayProof <em>Atlas</em></h1><p>Trust & Risk · Evidence before action.</p></div>
+      <div class="brand-area">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true"><span>P</span></div>
+          <div><h1>PayProof <em>Atlas</em></h1><p>Trust & Risk · Evidence before action.</p></div>
+        </div>
+        <div id="activeCompanyBrand" class="active-company-brand" aria-live="polite">
+          <div class="active-company-logo"><img id="activeCompanyLogo" alt="" hidden><span id="activeCompanyInitials">MW</span></div>
+          <div class="active-company-copy"><span>ACTIVE COMPANY</span><strong id="activeCompanyName">Meridian Works</strong><a id="activeCompanyWebsite" target="_blank" rel="noopener noreferrer" hidden></a></div>
+        </div>
       </div>
       <div class="top-status">
         <label class="workspace-picker"><span>WORKSPACE</span><select id="workspaceSelect" aria-label="Workspace"></select></label>
-        <span class="pill cyan">SYNTHETIC EXAMPLE</span>
+        <span id="workspaceTypePill" class="pill cyan">SYNTHETIC EXAMPLE</span>
         <span id="prismPill" class="pill muted"><i></i> PRISM CHECKING</span>
         <button id="importOpen" class="button ghost">＋ Import</button>
-        <button id="sourcesOpen" class="button ghost">⌁ Sources</button>
+        <button id="sourcesOpen" class="button ghost" aria-haspopup="dialog">⚙ Sources</button>
         <button id="tourButton" class="button primary">▶ Guided demo</button>
       </div>
     </header>
@@ -43,7 +49,7 @@
 
     <main class="command-center">
       <section class="hero-line">
-        <div><div class="eyebrow">LIVE TRUST &amp; RISK CONTEXT</div><h2 id="viewTitle">Security assurance atlas</h2></div>
+        <div><div class="eyebrow"><span id="activeCompanyContext">MERIDIAN WORKS</span> · LIVE TRUST &amp; RISK CONTEXT</div><h2 id="viewTitle">Security assurance atlas</h2></div>
         <div class="hero-actions"><span id="updatedAt">Loading…</span><button id="refreshButton" class="icon-button" title="Refresh">↻</button></div>
       </section>
 
@@ -91,11 +97,12 @@
   </div>
 
   <div id="drawerBackdrop" class="backdrop hidden"></div>
-  <section id="drawer" class="drawer hidden" aria-modal="true" role="dialog">
-    <header><div><span id="drawerLabel" class="section-label">DETAILS</span><h2 id="drawerTitle">Details</h2></div><button id="drawerClose" class="icon-button">×</button></header>
+  <section id="drawer" class="drawer hidden" aria-modal="true" aria-labelledby="drawerTitle" role="dialog">
+    <header><div><span id="drawerLabel" class="section-label">DETAILS</span><h2 id="drawerTitle">Details</h2></div><button id="drawerClose" class="icon-button" aria-label="Close drawer">×</button></header>
     <div id="drawerContent" class="drawer-content"></div>
   </section>
 
-  <script src="/static/app.js"></script>
+  <script defer src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+  <script defer src="/static/app.js"></script>
 </body>
 </html>
